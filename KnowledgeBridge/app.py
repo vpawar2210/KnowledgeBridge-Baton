@@ -978,6 +978,27 @@ def init_session_state():
 
 init_session_state()
 
+# ── Resolve Gemini API key from st.secrets / environment (never displayed) ───
+if not st.session_state.api_key:
+    _resolved_key = ""
+    try:
+        _resolved_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+    if not _resolved_key:
+        _resolved_key = os.environ.get("GEMINI_API_KEY", "")
+    if _resolved_key:
+        st.session_state.api_key = _resolved_key
+
+
+def _safe_err(e: Exception) -> str:
+    """Return str(e) with the API key replaced by '[hidden]'."""
+    msg = str(e)
+    key = st.session_state.get("api_key", "")
+    if key:
+        msg = msg.replace(key, "[hidden]")
+    return msg
+
 
 # ─── COMPONENT HELPERS ────────────────────────────────────────────────────────
 def source_badge(source_type: str) -> str:
@@ -1061,26 +1082,10 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.markdown("---")
 
-    api_key_input = st.text_input(
-        "🔑 Gemini API Key",
-        type="password",
-        value=st.session_state.api_key,
-        placeholder="AQ... (Google AI Studio Key)",
-        help="Google AI Studio Gemini API Key (supports AQ. keys)"
-    )
-    if api_key_input:
-        st.session_state.api_key = api_key_input
-
-    if not st.session_state.api_key:
-        st.markdown("""
-        <div class="kb-banner-plum">
-        🎭 <b>Interactive Demo Ready</b><br>
-        No API key required! Sarah Chen's payment microservice handover is loaded.
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("[Get free Gemini key →](https://aistudio.google.com/app/apikey)")
+    if st.session_state.api_key:
+        st.success("Gemini connected")
     else:
-        st.success("✅ Gemini Engine Connected")
+        st.info("No key configured - demo only")
 
     st.markdown("---")
     st.markdown("**Workflow Navigation**")
