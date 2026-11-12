@@ -3,6 +3,7 @@
 Merged Style A (Premium SaaS) + Style B (Bold Plum & Tool Identity)
 """
 
+import copy
 import json
 import time
 import streamlit as st
@@ -1891,11 +1892,55 @@ elif st.session_state.page == "review":
                 st.rerun()
             else:
                 # Real Gemini generation
+
+                # ── Build reviewed_profile: apply employee verifications and
+                #    attach manager notes before passing to Gemini ──────────────
+                reviewed_profile = copy.deepcopy(profile)
+
+                # Decisions: iterate original list by index to keep key alignment
+                filtered_decisions = []
+                for idx, decision in enumerate(profile.get("decisions", [])):
+                    verif = st.session_state.employee_verifications.get(
+                        f"decision_{idx}", {}
+                    )
+                    status = verif.get("status", "")
+                    if status == "Inaccurate / Outdated":
+                        continue  # drop entirely
+                    item = copy.deepcopy(decision)
+                    if status == "Needs Context" and verif.get("note"):
+                        item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
+                    filtered_decisions.append(item)
+                reviewed_profile["decisions"] = filtered_decisions
+
+                # Risks: use original list indices; different status labels
+                filtered_risks = []
+                for idx, risk in enumerate(profile.get("risks", [])):
+                    verif = st.session_state.employee_verifications.get(
+                        f"risk_{idx}", {}
+                    )
+                    status = verif.get("status", "")
+                    if status == "False Alarm / Resolved":
+                        continue  # drop entirely
+                    item = copy.deepcopy(risk)
+                    if status == "Mitigated / Low Priority":
+                        suffix = " [Employee: mitigated / low priority]"
+                        if verif.get("note"):
+                            suffix += f" [Employee note: {verif['note']}]"
+                        item["text"] = item["text"] + suffix
+                    elif status == "Active Risk" and verif.get("note"):
+                        item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
+                    filtered_risks.append(item)
+                reviewed_profile["risks"] = filtered_risks
+
+                # Manager notes: map section_id → note text
+                reviewed_profile["manager_notes"] = dict(st.session_state.corrections)
+                # ─────────────────────────────────────────────────────────────
+
                 with st.spinner("🤖 Generating Manager Handover with Gemini..."):
                     try:
                         from utils.gemini_engine import generate_manager_handover
                         mgr = generate_manager_handover(
-                            profile,
+                            reviewed_profile,
                             st.session_state.employee_name,
                             st.session_state.project_role,
                             st.session_state.api_key
@@ -1909,7 +1954,7 @@ elif st.session_state.page == "review":
                     try:
                         from utils.gemini_engine import generate_newhire_handover
                         nh = generate_newhire_handover(
-                            profile,
+                            reviewed_profile,
                             st.session_state.employee_name,
                             st.session_state.project_role,
                             st.session_state.api_key
