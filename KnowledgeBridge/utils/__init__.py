@@ -1,1 +1,1 @@
-# KnowledgeBridge utilities package
+# Baton utilities package

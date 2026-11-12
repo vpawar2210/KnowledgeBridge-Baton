@@ -15,7 +15,7 @@ PRIMARY_MODEL = "gemini-3.8-flash"
 FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"]
 
 ANALYZE_PROMPT = """
-You are a Knowledge Extraction AI. You analyze documents and conversations left behind by a departing employee and reconstruct a structured knowledge profile.
+You are Baton AI, an institutional knowledge extraction engine. You analyze documents and conversations left behind by a departing employee and reconstruct a structured knowledge profile for seamless team handover.
 
 Given the following source materials, extract and structure ALL useful knowledge.
 
@@ -75,7 +75,7 @@ Return ONLY valid JSON. No markdown. No explanation. Just the JSON object.
 
 
 MANAGER_HANDOVER_PROMPT = """
-You are writing a **Manager-level Knowledge Handover Document**.
+You are writing a **Manager-level Knowledge Handover Document** for Baton (Knowledge Handover Platform).
 
 Based on this knowledge profile:
 {knowledge_json}
@@ -98,7 +98,7 @@ Use clear, professional language. Include ⚠️ for urgent items.
 
 
 NEWHIRE_HANDOVER_PROMPT = """
-You are writing a **New Hire / Technical Successor Knowledge Handover Document**.
+You are writing a **New Hire / Technical Successor Knowledge Handover Document** for Baton (Knowledge Handover Platform).
 
 Based on this knowledge profile:
 {knowledge_json}
@@ -122,7 +122,7 @@ Use ⚠️ for landmines, 💡 for tips, 🔗 for important links/references.
 
 
 EMPLOYEE_HANDOVER_PROMPT = """
-You are writing an **Employee Notes & Tribal Knowledge Addendum** for a knowledge handover.
+You are writing an **Employee Notes & Tribal Knowledge Addendum** for Baton (Knowledge Handover Platform).
 
 The departing employee has reviewed the AI-extracted knowledge profile and provided corrections,
 gap answers, and tribal knowledge. Weave these into a well-structured Markdown document.

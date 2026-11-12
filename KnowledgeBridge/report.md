@@ -1,5 +1,5 @@
 # 🏃‍♂️ Baton — Comprehensive Project Report & System Architecture
-### (KnowledgeBridge Core Engine)
+### (Baton Core Engine)
 ### Intelligent Knowledge Handover & Institutional Memory Preservation Platform
 **Hackathon Track:** Prevent Critical Knowledge From Leaving With People  
 **Project Name:** Baton | **Submitted By:** Vaibhav Pawar (Codepunethinkers)
@@ -33,7 +33,7 @@
 
 Every time a skilled engineer or team lead leaves an organization, years of undocumented decisions, tribal processes, edge-case workarounds, and vendor context walk out the door with them. This "knowledge leakage" costs global enterprises an estimated **$47 billion annually** and leaves replacement hires operating in fear of breaking brittle, unexplained systems.
 
-**Baton** (KnowledgeBridge) is an AI-powered knowledge handover platform designed to solve this crisis. Instead of relying on a frantic, unstructured two-week documentation scramble, KnowledgeBridge connects to the tools where work actually happens—repositories, architecture specifications, notes, and task threads—reconstructs the implicit decision log, surfaces critical risks, and provides an interactive **5-step human-in-the-loop pipeline**:
+**Baton** is an AI-powered knowledge handover platform designed to solve this crisis. Instead of relying on a frantic, unstructured two-week documentation scramble, Baton connects to the tools where work actually happens—repositories, architecture specifications, notes, and task threads—reconstructs the implicit decision log, surfaces critical risks, and provides an interactive **5-step human-in-the-loop pipeline**:
 
 $$\text{Connect} \longrightarrow \text{Reconstruct} \longrightarrow \text{Employee Hub} \longrightarrow \text{Manager Review} \longrightarrow \text{Multi-Perspective Handover}$$
 
@@ -97,13 +97,13 @@ flowchart TD
 ### 3.1 Persona Deep-Dives
 1. **The Departing Employee (Sarah Chen — Senior Backend Engineer):**
    - *Pain Point:* "I have 10 days left and still have PRs to close. I don't know what my successor will need, and writing a 50-page doc from scratch is impossible."
-   - *KnowledgeBridge Fix:* The AI automatically reconstructs her past 3 years of decisions from git commits and architecture notes. Sarah simply opens the **Employee Hub**, confirms/clarifies findings, answers 3 specific questions the AI flagged as missing, and enters her tribal tips.
+   - *Baton Fix:* The AI automatically reconstructs her past 3 years of decisions from git commits and architecture notes. Sarah simply opens the **Employee Hub**, confirms/clarifies findings, answers 3 specific questions the AI flagged as missing, and enters her tribal tips.
 2. **The Engineering Manager (David — Engineering Director):**
    - *Pain Point:* "Every time a senior person leaves, we discover 2 months later that an API contract expired or a migration was left half-done."
-   - *KnowledgeBridge Fix:* The **Manager Review** displays an executive risk radar highlighting expiring vendor contracts (e.g., DataVerify Inc. on Dec 31) and unfinished database migrations, requiring explicit sign-off.
+   - *Baton Fix:* The **Manager Review** displays an executive risk radar highlighting expiring vendor contracts (e.g., DataVerify Inc. on Dec 31) and unfinished database migrations, requiring explicit sign-off.
 3. **The Incoming Successor (Marcus — Junior/Mid Engineer):**
    - *Pain Point:* "I see weird workarounds in `PaymentGatewayService.java`. If I change the circuit breaker thresholds, will production fail?"
-   - *KnowledgeBridge Fix:* The **Technical Successor Handover** provides a dedicated section titled *"What NOT To Break"*, documenting why the circuit breaker was tuned over 6 months to a 50% threshold with a 10s half-open window.
+   - *Baton Fix:* The **Technical Successor Handover** provides a dedicated section titled *"What NOT To Break"*, documenting why the circuit breaker was tuned over 6 months to a 50% threshold with a 10s half-open window.
 
 ---
 
@@ -307,11 +307,11 @@ Handles ingestion of user-uploaded files from Streamlit's `UploadedFile` buffer.
 
 ## 8. UI/UX Design System Specification
 
-KnowledgeBridge implements a bespoke design system combining **Style A** (refined SaaS layout, generous whitespace, rounded stat chips) and **Style B** (deep plum brand framing, high-contrast orange actions).
+Baton implements a bespoke design system combining **Style A** (refined SaaS layout, generous whitespace, rounded stat chips) and **Style B** (deep plum brand framing, high-contrast orange actions).
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│  🌉 KnowledgeBridge   1. Connect → 2. Reconstruct → 3. Employee ...   │  (Top Navbar)
+│  🏃‍♂️ Baton   1. Connect → 2. Reconstruct → 3. Employee ...   │  (Top Navbar)
 ├────────────────────────────────────────────────────────────────────────┤
 │                                                                        │
 │  ┌───────────────────────────────┐  ┌───────────────────────────────┐  │
@@ -387,7 +387,7 @@ When `gemini_engine.analyze_sources()` runs, it strictly outputs this verified s
 ```
 
 ### 9.2 Synthetic Demo Dataset: Sarah Chen / PayFlow
-To satisfy the hackathon requirement of enabling zero-friction demonstrations without exposing real enterprise data or requiring an API key, KnowledgeBridge embeds a comprehensive synthetic scenario:
+To satisfy the hackathon requirement of enabling zero-friction demonstrations without exposing real enterprise data or requiring an API key, Baton embeds a comprehensive synthetic scenario:
 - **Departing Employee:** Sarah Chen, Senior Backend Engineer (3 years on PayFlow).
 - **Core Microservice:** PayFlow transaction processing engine handling thousands of merchant requests daily.
 - **6 Extracted Architectural Decisions:** PostgreSQL over MongoDB (ACID compliance), Resilience4j Circuit Breaker, Kafka async notifications, Stripe SDK tokenization (PCI-DSS compliance), Redis sliding window rate limiter (1000 RPM), Blue-Green Kubernetes deployment.
@@ -444,7 +444,7 @@ The application will open in your browser at `http://localhost:8501`.
 
 ## 12. Conclusion & Next Horizons
 
-Baton transforms knowledge handover from an ad-hoc, panic-driven administrative chore into an automated, auditable, and human-verified engineering workflow. By combining automated extraction across developer tools with human-in-the-loop verification, KnowledgeBridge ensures that when talented people move on, their institutional memory stays behind to empower those who follow.
+Baton transforms knowledge handover from an ad-hoc, panic-driven administrative chore into an automated, auditable, and human-verified engineering workflow. By combining automated extraction across developer tools with human-in-the-loop verification, Baton ensures that when talented people move on, their institutional memory stays behind to empower those who follow.
 
 ### Roadmap for Round 3 & Enterprise Expansion:
 - **Active Slack/Teams Bot:** Interactive bot that prompts departing employees with daily 2-minute questions to resolve knowledge gaps before their final week.

@@ -1,5 +1,5 @@
 """
-File processor for KnowledgeBridge.
+File processor for Baton (Knowledge Handover Platform).
 Handles PDF, TXT, and MD file parsing.
 """
 

@@ -1024,8 +1024,8 @@ def step_indicator(current_page: str):
 
     html = '<div class="kb-top-navbar">'
     html += '<div class="kb-nav-brand">'
-    html += '<div class="kb-brand-icon">🌉</div>'
-    html += '<div><span class="kb-brand-title">🏃‍♂️ Baton</span> <span class="kb-brand-pill">KNOWLEDGE HANDOVER</span></div>'
+    html += '<div class="kb-brand-icon">🏃‍♂️</div>'
+    html += '<div><span class="kb-brand-title">Baton</span> <span class="kb-brand-pill">KNOWLEDGE HANDOVER</span></div>'
     html += '</div>'
 
     html += '<div class="kb-nav-steps">'
@@ -1051,9 +1051,9 @@ def step_indicator(current_page: str):
 with st.sidebar:
     st.markdown("""
     <div style="display:flex; align-items:center; gap:0.6rem; margin-bottom:1.25rem;">
-        <div style="width:36px; height:36px; border-radius:10px; background:rgba(255,255,255,0.12); display:flex; align-items:center; justify-content:center; font-size:1.2rem;">🌉</div>
+        <div style="width:36px; height:36px; border-radius:10px; background:rgba(255,255,255,0.12); display:flex; align-items:center; justify-content:center; font-size:1.2rem;">🏃‍♂️</div>
         <div>
-            <div style="font-size:1.15rem; font-weight:800; color:#FFFFFF;">🏃‍♂️ Baton</div>
+            <div style="font-size:1.15rem; font-weight:800; color:#FFFFFF;">Baton</div>
             <div style="font-size:0.75rem; color:#CBD5E1;">Knowledge Retention Platform</div>
         </div>
     </div>

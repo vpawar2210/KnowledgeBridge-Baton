@@ -1,5 +1,5 @@
 """
-GitHub connector for KnowledgeBridge.
+GitHub connector for Baton (Knowledge Handover Platform).
 Fetches README, commits, issues, and PRs from a public or private GitHub repo.
 Works without a token for public repos.
 """
@@ -42,7 +42,7 @@ def fetch_repo_knowledge(repo_url: str, token: str = None) -> list[dict]:
     
     headers = {
         "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "KnowledgeBridge/1.0"
+        "User-Agent": "Baton/1.0"
     }
     if token:
         headers["Authorization"] = f"token {token}"
