@@ -4,12 +4,24 @@ Enterprise Presentation Layer Refactor
 """
 
 import copy
+import csv
+import io
 import json
 import os
 import re
 import textwrap
 import time
+from pathlib import Path
 import streamlit as st
+
+from utils.auth import authenticate, logout, is_locked, get_lockout_remaining
+from utils.store import (
+    load_into_session,
+    save_project_state,
+    log_audit_entry,
+    load_project_state,
+    get_empty_state
+)
 
 # ─── Page config (must be first Streamlit call) ───────────────────────────────
 st.set_page_config(
@@ -19,11 +31,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─── SESSION STATE INIT (Early Initialization for Theme) ──────────────────────
+# ─── SESSION STATE INIT (Early Initialization for Theme & Auth) ───────────────
 def init_session_state():
     defaults = {
+        "authenticated": False,
+        "auth_username": "",
+        "auth_role": "",
+        "auth_name": "",
         "page": "connect",
-        "theme": "System",
         "api_key": "",
         "employee_name": "",
         "project_role": "",
@@ -32,7 +47,6 @@ def init_session_state():
         "github_token": "",
         "pasted_text": "",
         "knowledge_profile": None,
-        "is_demo": False,
         "approvals": {},
         "corrections": {},
         "manager_handover": None,
@@ -46,7 +60,9 @@ def init_session_state():
         "handovers_run": 0,
         "action_history": [],
         "acknowledgement": None,
-        "view_role": "Manager",
+        "state_notice": None,
+        "input_truncated": False,
+        "_last_logged_page": "",
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -98,937 +114,250 @@ def redact_sensitive_info(text: str) -> str:
 
 
 # ─── GLOBAL DESIGN SYSTEM & THEME ENGINE ──────────────────────────────────────
-def get_theme_css(theme: str) -> str:
-    light_tokens = """
-    --bg-canvas: #F8F9FC;
-    --bg-surface: #FFFFFF;
-    --bg-subtle: #F1F4F9;
-    --border-color: #E2E6EF;
-    --border-strong: #CBD2E0;
-    --text-primary: #0F172A;
-    --text-secondary: #475569;
-    --text-muted: #64748B;
-    
-    --accent: #4F46E5;
-    --accent-hover: #4338CA;
-    --accent-subtle: rgba(79, 70, 229, 0.08);
-    --accent-border: rgba(79, 70, 229, 0.25);
-    --accent-gradient: linear-gradient(135deg, #6366F1 0%, #4F46E5 100%);
-    --card-shadow: 0 1px 3px rgba(15, 23, 42, 0.05), 0 6px 16px rgba(15, 23, 42, 0.03);
-    --card-shadow-hover: 0 4px 20px rgba(79, 70, 229, 0.09);
-    
-    --status-success-text: #059669;
-    --status-success-bg: #ECFDF5;
-    --status-success-border: #A7F3D0;
-    
-    --status-warning-text: #D97706;
-    --status-warning-bg: #FFFBEB;
-    --status-warning-border: #FDE68A;
-    
-    --status-danger-text: #DC2626;
-    --status-danger-bg: #FEF2F2;
-    --status-danger-border: #FECACA;
-
-    --radius: 10px;
-    --radius-sm: 6px;
-    --radius-lg: 14px;
-    """
-
-    dark_tokens = """
-    --bg-canvas: #0F1117;
-    --bg-surface: #171923;
-    --bg-subtle: #1F2230;
-    --border-color: #272B3C;
-    --border-strong: #383D54;
-    --text-primary: #F3F4F8;
-    --text-secondary: #9FA6BC;
-    --text-muted: #687087;
-    
-    --accent: #6366F1;
-    --accent-hover: #4F46E5;
-    --accent-subtle: rgba(99, 102, 241, 0.15);
-    --accent-border: rgba(99, 102, 241, 0.35);
-    --accent-gradient: linear-gradient(135deg, #818CF8 0%, #6366F1 100%);
-    --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-    --card-shadow-hover: 0 6px 24px rgba(99, 102, 241, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.10);
-    
-    --status-success-text: #34D399;
-    --status-success-bg: rgba(16, 185, 129, 0.12);
-    --status-success-border: rgba(16, 185, 129, 0.28);
-    
-    --status-warning-text: #FBBF24;
-    --status-warning-bg: rgba(245, 158, 11, 0.12);
-    --status-warning-border: rgba(245, 158, 11, 0.28);
-    
-    --status-danger-text: #F87171;
-    --status-danger-bg: rgba(239, 68, 68, 0.12);
-    --status-danger-border: rgba(239, 68, 68, 0.28);
-
-    --radius: 10px;
-    --radius-sm: 6px;
-    --radius-lg: 14px;
-    """
-
-    if theme == "Dark":
-        vars_block = f":root {{\n{dark_tokens}\n}}"
-    elif theme == "Light":
-        vars_block = f":root {{\n{light_tokens}\n}}"
-    else:  # "System"
-        vars_block = f""":root {{
-{light_tokens}
-}}
-@media (prefers-color-scheme: dark) {{
-    :root {{
-{dark_tokens}
-    }}
-}}"""
-
-    return f"""
+# ─── SIDEBAR STYLES (Phase 3: Always near-black in both themes) ───────────────
+st.markdown(textwrap.dedent("""
 <style>
-{vars_block}
-
-/* Global resets & human typography with atmospheric ambient background */
-html, body, [data-testid="stAppViewContainer"] {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
-    background-color: var(--bg-canvas) !important;
-    background-image: radial-gradient(circle at 50% -12%, rgba(99, 102, 241, 0.11), transparent 60%),
-                      radial-gradient(circle at 92% 16%, rgba(245, 158, 11, 0.04), transparent 45%) !important;
-    background-attachment: fixed !important;
-    color: var(--text-primary) !important;
-    -webkit-font-smoothing: antialiased;
-}}
-
-[data-testid="stHeader"] {{
-    background: transparent !important;
-}}
-
-/* Container shell: fluid, open workspace instead of a claustrophobic box */
-.main .block-container {{
-    max-width: 1240px !important;
-    padding: 1.25rem 2rem 3rem 2rem !important;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    color: var(--text-primary) !important;
-}}
-
-/* Top Stepper Navigation: Floating executive header */
-.kb-top-navbar {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.85rem 1.35rem;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    margin-bottom: 1.5rem;
-    gap: 1rem;
-    flex-wrap: wrap;
-    box-shadow: var(--card-shadow);
-}}
-.kb-nav-brand {{
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-}}
-.kb-brand-logo {{
-    width: 32px;
-    height: 32px;
-    border-radius: 9px;
-    background: var(--accent-gradient);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #FFFFFF;
-    box-shadow: 0 2px 10px rgba(99, 102, 241, 0.35);
-}}
-.kb-brand-text {{
-    display: flex;
-    flex-direction: column;
-}}
-.kb-brand-title {{
-    font-size: 1.12rem;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-    line-height: 1.15;
-}}
-.kb-brand-sub {{
-    font-size: 0.72rem;
-    font-weight: 500;
-    color: var(--text-muted);
-    letter-spacing: 0.01em;
-}}
-.kb-nav-steps {{
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-}}
-.kb-step-connector {{
-    width: 12px;
-    height: 2px;
-    background: var(--border-color);
-    border-radius: 1px;
-}}
-.kb-nav-step-item {{
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: var(--text-muted);
-    padding: 4px 10px;
-    border-radius: 20px;
-    border: 1px solid transparent;
-    transition: all 0.18s ease;
-}}
-.kb-step-num {{
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    font-size: 0.68rem;
-    font-weight: 600;
-    background: var(--bg-subtle);
-    color: var(--text-secondary);
-    line-height: 1;
-}}
-.kb-nav-step-item.active {{
-    background: var(--accent-subtle);
-    color: var(--accent) !important;
-    border-color: var(--accent-border);
-    font-weight: 600;
-    box-shadow: 0 0 14px rgba(99, 102, 241, 0.2);
-}}
-.kb-nav-step-item.active .kb-step-num {{
-    background: var(--accent-gradient);
-    color: #FFFFFF;
-}}
-.kb-nav-step-item.done {{
-    color: var(--status-success-text);
-    background: var(--status-success-bg);
-    border-color: var(--status-success-border);
-}}
-.kb-nav-step-item.done .kb-step-num {{
-    background: transparent;
-    color: var(--status-success-text);
-}}
-.kb-nav-status {{
-    background: var(--bg-subtle);
-    color: var(--text-secondary);
-    padding: 4px 10px;
-    border-radius: 20px;
-    border: 1px solid var(--border-color);
-    font-size: 0.78rem;
-    font-weight: 500;
-}}
-.kb-nav-persona {{
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-color);
-    padding: 4px 11px;
-    border-radius: 20px;
-    font-size: 0.78rem;
-    font-weight: 500;
-    color: var(--text-secondary);
-}}
-.kb-avatar-chip {{
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
-    color: #FFFFFF;
-    font-size: 0.62rem;
-    font-weight: 700;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}}
-
-/* Sidebar: Refined, warm neutral with elevation */
-[data-testid="stSidebar"] {{
-    background-color: var(--bg-canvas) !important;
-    border-right: 1px solid var(--border-color) !important;
-}}
+[data-testid="stSidebar"] { background: #0C0C0E; border-right: 1px solid #27272A; }
 [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] span,
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] strong,
-[data-testid="stSidebar"] label {{
-    color: var(--text-primary) !important;
-}}
-.kb-sidebar-header {{
-    padding: 0.25rem 0 0.75rem 0;
-}}
-.kb-sidebar-subtitle {{
-    font-size: 0.76rem;
-    color: var(--text-muted);
-    margin-top: 3px;
-    line-height: 1.4;
-}}
-.kb-sidebar-section-title {{
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    margin: 1rem 0 0.45rem 0;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-}}
-.kb-sidebar-footer {{
-    font-size: 0.74rem;
-    color: var(--text-muted);
-    margin-top: 1.5rem;
-    line-height: 1.5;
-}}
-[data-testid="stSidebar"] .stButton > button {{
-    background: var(--bg-surface) !important;
-    color: var(--text-primary) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: var(--radius-sm) !important;
-    font-weight: 500 !important;
-    font-size: 0.85rem !important;
-    text-align: left !important;
-    padding: 0.5rem 0.9rem !important;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03) !important;
-    transition: all 0.15s ease !important;
-}}
-[data-testid="stSidebar"] .stButton > button:hover {{
-    background: var(--bg-subtle) !important;
-    border-color: var(--accent) !important;
-    transform: translateY(-1px) !important;
-}}
-[data-testid="stSidebar"] .stButton > button:active {{
-    transform: scale(0.985) !important;
-}}
-[data-testid="stSidebar"] .stButton > button[kind="primary"] {{
-    background: var(--accent-gradient) !important;
-    color: #FFFFFF !important;
-    border: 1px solid transparent !important;
-    font-weight: 600 !important;
-    box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3) !important;
-}}
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span { color: #FAFAFA; }
+[data-testid="stSidebar"] .stButton > button {
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  justify-content: flex-start; text-align: left; width: 100%; }
+[data-testid="stSidebar"] .stButton > button p,
+[data-testid="stSidebar"] .stButton > button span { color: #A1A1AA; text-align: left; }
+[data-testid="stSidebar"] .stButton > button:hover { background: #18181B; }
+[data-testid="stSidebar"] .stButton > button:hover p { color: #FAFAFA; }
+[data-testid="stSidebar"] .stButton > button[kind="primary"],
+[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] {
+  background: #1F1F23; border-left: 2px solid #4F46E5; }
+[data-testid="stSidebar"] .stButton > button[kind="primary"] p,
+[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] p { color: #FAFAFA; }
+[data-testid="stSidebar"] .stButton > button:disabled { opacity: 0.45; }
+[data-testid="stSidebar"] .kb-signout .stButton > button {
+  border: 1px solid #3F3F46; justify-content: center; background: transparent; }
+[data-testid="stSidebar"] .kb-signout .stButton > button p,
+[data-testid="stSidebar"] .kb-signout .stButton > button span {
+  color: #FAFAFA; text-align: center; }
+[data-testid="stSidebar"] .kb-signout .stButton > button:hover {
+  background: #18181B; }
 
-/* Stat Cards: Elevated, distinctive colored stripe on top */
-.kb-stat-grid {{
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 0.85rem;
-    margin: 1rem 0 1.35rem 0;
-}}
-.kb-stat-card {{
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 1rem 1.25rem;
-    box-shadow: var(--card-shadow);
-    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-    position: relative;
-    overflow: hidden;
-}}
-.kb-stat-card:hover {{
-    transform: translateY(-2px);
-    border-color: var(--border-strong);
-    box-shadow: var(--card-shadow-hover);
-}}
-.kb-stat-indicator {{
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: var(--accent);
-    opacity: 0.9;
-}}
-.kb-stat-label {{
-    font-size: 0.72rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    margin-bottom: 5px;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-}}
-.kb-stat-number {{
-    font-size: 1.65rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-primary);
-    line-height: 1.15;
-    letter-spacing: -0.03em;
-}}
-
-/* Structured Panels & Cards */
-.kb-panel {{
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 1.35rem 1.6rem;
-    margin-bottom: 1.25rem;
-    color: var(--text-primary);
-    box-shadow: var(--card-shadow);
-}}
-.kb-panel-subtle {{
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 1.35rem 1.6rem;
-    margin-bottom: 1.25rem;
-    color: var(--text-primary);
-}}
-.kb-panel-hero {{
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-left: 4px solid var(--accent);
-    border-radius: var(--radius);
-    padding: 1.35rem 1.6rem;
-    margin-bottom: 1.25rem;
-    color: var(--text-primary);
-    box-shadow: var(--card-shadow);
-}}
-.kb-preview-row {{
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    padding: 8px 12px;
-    margin-bottom: 0.5rem;
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-}}
-.kb-file-row {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    padding: 8px 12px;
-    margin-bottom: 0.45rem;
-    font-size: 0.85rem;
-    color: var(--text-primary);
-    box-shadow: var(--card-shadow);
-    transition: border-color 0.15s ease, transform 0.15s ease;
-}}
-.kb-file-row:hover {{
-    border-color: var(--accent);
-    transform: translateY(-1px);
-}}
-.kb-file-info {{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}}
-.kb-file-ext-chip {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 0.68rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    background: var(--accent-subtle);
-    color: var(--accent);
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid var(--accent-border);
-    letter-spacing: 0.02em;
-}}
-.kb-file-size {{
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-}}
-.kb-meta-list {{
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin: 0.85rem 0;
-}}
-.kb-meta-row {{
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    font-size: 0.84rem;
-    padding: 7px 11px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-color);
-}}
-.kb-meta-key {{
-    color: var(--text-muted);
-    font-weight: 600;
-    font-size: 0.74rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-}}
-.kb-meta-val {{
-    color: var(--text-primary);
-    font-weight: 600;
-    text-align: right;
-}}
-.kb-citation {{
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-color);
-    border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm);
-    padding: 9px 13px;
-    margin: 0.5rem 0 0.75rem 0;
-}}
-.kb-citation-header {{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
-}}
-.kb-citation-tag {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 0.65rem;
-    font-weight: 700;
-    color: var(--accent);
-    background: var(--accent-subtle);
-    padding: 1px 6px;
-    border-radius: 3px;
-    border: 1px solid var(--accent-border);
-    letter-spacing: 0.04em;
-}}
-.kb-citation-source {{
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}}
-.kb-citation-body {{
-    font-size: 0.85rem;
-    font-style: italic;
-    color: var(--text-secondary);
-    line-height: 1.5;
-}}
-.kb-audit-entry {{
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 7px 9px;
-    border-bottom: 1px solid var(--border-color);
-    font-size: 0.8125rem;
-}}
-.kb-audit-time {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-}}
-.kb-audit-who {{
-    font-weight: 600;
-    color: var(--text-primary);
-}}
-.kb-audit-action {{
-    color: var(--text-secondary);
-}}
-.kb-audit-reason {{
-    font-style: italic;
-    color: var(--text-muted);
-}}
-.kb-receipt-card {{
-    background: var(--bg-surface);
-    border: 1px solid var(--status-success-border);
-    border-left: 4px solid var(--status-success-text);
-    border-radius: var(--radius);
-    padding: 1.15rem 1.4rem;
-    margin: 1rem 0;
-    box-shadow: var(--card-shadow);
-}}
-.kb-receipt-header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid var(--status-success-border);
-    padding-bottom: 0.65rem;
-    margin-bottom: 0.85rem;
-}}
-.kb-receipt-badge {{
-    font-size: 0.86rem;
-    font-weight: 600;
-    color: var(--status-success-text);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}}
-.kb-receipt-timestamp {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-}}
-.kb-receipt-body {{
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-}}
-.kb-receipt-meta {{
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.85rem;
-}}
-.kb-receipt-label {{
-    color: var(--text-muted);
-}}
-.kb-receipt-value {{
-    color: var(--text-primary);
-}}
-.kb-card {{
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 1.1rem 1.35rem;
-    margin-bottom: 0.85rem;
-    color: var(--text-primary);
-    box-shadow: var(--card-shadow);
-    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
-}}
-.kb-card:hover {{
-    transform: translateY(-1px);
-    border-color: var(--border-strong);
-    box-shadow: var(--card-shadow-hover);
-}}
-.kb-card-warning {{
-    background: var(--status-warning-bg);
-    border: 1px solid var(--status-warning-border);
-    border-left: 3px solid var(--status-warning-text);
-}}
-.kb-card-danger {{
-    background: var(--status-danger-bg);
-    border: 1px solid var(--status-danger-border);
-    border-left: 3px solid var(--status-danger-text);
-}}
-.kb-card-success {{
-    background: var(--status-success-bg);
-    border: 1px solid var(--status-success-border);
-    border-left: 3px solid var(--status-success-text);
-}}
-.kb-card-info {{
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-left: 3px solid var(--accent);
-}}
-.kb-section-title {{
-    font-size: 1.08rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 0.85rem;
-    letter-spacing: -0.01em;
-}}
-
-/* Badges: Soft pills, readable contrast */
-.badge {{
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
-    border-radius: 12px;
-    font-size: 0.74rem;
-    font-weight: 600;
-    line-height: 1.2;
-}}
-.badge-neutral {{ background: var(--bg-subtle); color: var(--text-secondary); border: 1px solid var(--border-color); }}
-.badge-success {{ background: var(--status-success-bg); color: var(--status-success-text); border: 1px solid var(--status-success-border); }}
-.badge-warning {{ background: var(--status-warning-bg); color: var(--status-warning-text); border: 1px solid var(--status-warning-border); }}
-.badge-danger  {{ background: var(--status-danger-bg); color: var(--status-danger-text); border: 1px solid var(--status-danger-border); }}
-
-/* Buttons: Tactile controls with human polish */
-button[kind="primary"] {{
-    background: var(--accent-gradient) !important;
-    color: #FFFFFF !important;
-    border: 1px solid transparent !important;
-    border-radius: var(--radius-sm) !important;
-    font-weight: 600 !important;
-    font-size: 0.88rem !important;
-    padding: 0.55rem 1.25rem !important;
-    box-shadow: 0 2px 8px rgba(79, 70, 229, 0.28) !important;
-    transition: all 0.18s ease !important;
-}}
-button[kind="primary"]:hover {{
-    filter: brightness(1.08) !important;
-    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.4) !important;
-    transform: translateY(-1px) !important;
-}}
-button[kind="primary"]:active {{
-    transform: scale(0.985) !important;
-}}
-button[kind="secondary"] {{
-    background-color: var(--bg-surface) !important;
-    color: var(--text-primary) !important;
-    border: 1px solid var(--border-strong) !important;
-    border-radius: var(--radius-sm) !important;
-    font-weight: 500 !important;
-    font-size: 0.88rem !important;
-    padding: 0.55rem 1.25rem !important;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
-    transition: all 0.15s ease !important;
-}}
-button[kind="secondary"]:hover {{
-    background-color: var(--bg-subtle) !important;
-    border-color: var(--accent) !important;
-    color: var(--text-primary) !important;
-    transform: translateY(-1px) !important;
-}}
-button[kind="secondary"]:active {{
-    transform: scale(0.985) !important;
-}}
-button:focus-visible {{
-    outline: 2px solid var(--accent) !important;
-    outline-offset: 2px !important;
-}}
-
-/* Form Controls */
-div[data-baseweb="input"] > div,
-div[data-baseweb="textarea"] > div,
-div[data-baseweb="select"] > div {{
-    background-color: var(--bg-surface) !important;
-    border: 1px solid var(--border-strong) !important;
-    border-radius: var(--radius-sm) !important;
-    color: var(--text-primary) !important;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03) !important;
-    transition: border-color 0.15s ease !important;
-}}
-div[data-baseweb="input"] input,
-div[data-baseweb="textarea"] textarea {{
-    color: var(--text-primary) !important;
-    background-color: transparent !important;
-}}
-div[data-baseweb="input"] > div:focus-within,
-div[data-baseweb="textarea"] > div:focus-within,
-div[data-baseweb="select"] > div:focus-within {{
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 2px var(--accent-subtle) !important;
-}}
-
-/* Selectbox dropdown menu */
-div[role="listbox"] {{
-    background-color: var(--bg-surface) !important;
-    border: 1px solid var(--border-strong) !important;
-    border-radius: var(--radius-sm) !important;
-    box-shadow: var(--card-shadow) !important;
-}}
-div[role="option"] {{
-    color: var(--text-primary) !important;
-}}
-div[role="option"]:hover,
-div[role="option"][aria-selected="true"] {{
-    background-color: var(--bg-subtle) !important;
-}}
-
-/* Radio options */
-div[data-testid="stRadio"] label span {{
-    color: var(--text-primary) !important;
-}}
-
-/* Blockquote & Markdown styling */
-blockquote {{
-    border-left: 3px solid var(--accent) !important;
-    background: var(--bg-subtle) !important;
-    color: var(--text-secondary) !important;
-    padding: 0.6rem 1rem !important;
-    margin: 0.6rem 0 !important;
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0 !important;
-}}
-hr {{
-    border-color: var(--border-color) !important;
-}}
-h1, h2, h3, h4, h5, h6 {{
-    color: var(--text-primary) !important;
-}}
-
-/* Tabs */
-button[data-baseweb="tab"] {{
-    font-size: 0.85rem !important;
-    font-weight: 500 !important;
-    color: var(--text-muted) !important;
-    border-radius: var(--radius-sm) !important;
-    padding: 0.45rem 0.9rem !important;
-}}
-button[data-baseweb="tab"][aria-selected="true"] {{
-    color: var(--accent) !important;
-    background-color: var(--accent-subtle) !important;
-    border-bottom: 2px solid var(--accent) !important;
-}}
-
-/* Expanders */
-div[data-testid="stExpander"] {{
-    background: var(--bg-surface) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: var(--radius) !important;
-    box-shadow: var(--card-shadow) !important;
-    margin-bottom: 0.6rem !important;
-}}
-div[data-testid="stExpander"] details summary span {{
-    color: var(--text-primary) !important;
-}}
-
-/* Notices & Banners: Human Callout with Warm Accent */
-.kb-banner {{
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-left: 4px solid var(--accent);
-    border-radius: var(--radius);
-    padding: 12px 16px;
-    margin-bottom: 1.25rem;
-    font-size: 0.86rem;
-    color: var(--text-secondary);
-    box-shadow: var(--card-shadow);
-    line-height: 1.5;
-}}
-.kb-banner-tip {{
-    background: var(--accent-subtle);
-    border: 1px solid var(--accent-border);
-    border-left: 4px solid var(--accent);
-    border-radius: var(--radius);
-    padding: 12px 16px;
-    margin-bottom: 1.25rem;
-    font-size: 0.86rem;
-    color: var(--text-primary);
-    line-height: 1.5;
-}}
-
-/* Progress Bar */
-.stProgress > div > div > div > div {{
-    background: var(--accent-gradient) !important;
-    border-radius: var(--radius-sm) !important;
-}}
-
-/* Responsive Rules down to ~375px */
-@media (max-width: 768px) {{
-    .main .block-container {{
-        padding: 1rem 1rem 2rem 1rem !important;
-    }}
-    .kb-top-navbar {{
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 0.75rem;
-    }}
-    .kb-nav-steps {{
-        flex-wrap: wrap;
-    }}
-    .kb-stat-grid {{
-        grid-template-columns: repeat(2, 1fr);
-    }}
-}}
-@media (max-width: 480px) {{
-    .kb-stat-grid {{
-        grid-template-columns: 1fr;
-    }}
-    .main .block-container {{
-        padding: 0.75rem 0.75rem 1.5rem 0.75rem !important;
-    }}
-}}
-
-/* Markdown document typography — tables and code blocks */
-div[data-testid="stMarkdownContainer"] table {{
-    border-collapse: collapse !important;
-    width: 100% !important;
-    font-size: 0.84rem !important;
-    margin: 1rem 0 !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: var(--radius) !important;
-    overflow: hidden !important;
-    box-shadow: var(--card-shadow) !important;
-}}
-div[data-testid="stMarkdownContainer"] th {{
-    background: var(--bg-subtle) !important;
-    color: var(--text-secondary) !important;
-    font-weight: 600 !important;
-    font-size: 0.75rem !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.04em !important;
-    padding: 8px 12px !important;
-    border-bottom: 1px solid var(--border-strong) !important;
-    text-align: left !important;
-}}
-div[data-testid="stMarkdownContainer"] td {{
-    color: var(--text-primary) !important;
-    padding: 7px 12px !important;
-    border-bottom: 1px solid var(--border-color) !important;
-    vertical-align: top !important;
-}}
-div[data-testid="stMarkdownContainer"] tr:last-child td {{
-    border-bottom: none !important;
-}}
-div[data-testid="stMarkdownContainer"] tr:nth-child(even) td {{
-    background: var(--bg-subtle) !important;
-}}
-div[data-testid="stMarkdownContainer"] code {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
-    font-size: 0.82em !important;
-    background: var(--bg-subtle) !important;
-    color: var(--accent) !important;
-    padding: 2px 6px !important;
-    border-radius: 4px !important;
-    border: 1px solid var(--border-color) !important;
-}}
-div[data-testid="stMarkdownContainer"] pre {{
-    background: var(--bg-subtle) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: var(--radius) !important;
-    padding: 1rem 1.25rem !important;
-    overflow-x: auto !important;
-}}
-div[data-testid="stMarkdownContainer"] pre code {{
-    background: transparent !important;
-    border: none !important;
-    padding: 0 !important;
-    color: var(--text-primary) !important;
-    font-size: 0.84rem !important;
-}}
-
-/* Approval progress heading */
-.kb-approval-progress {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.6rem 0;
-    margin-bottom: 0.5rem;
-}}
-.kb-approval-progress-label {{
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-}}
-.kb-approval-progress-count {{
-    font-size: 1.1rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-primary);
-    letter-spacing: -0.025em;
-}}
-
-/* Review action box */
-.kb-review-action-box {{
-    background: var(--bg-subtle);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius);
-    padding: 0.85rem 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}}
-
-/* Accessibility: Reduced motion */
-@media (prefers-reduced-motion: reduce) {{
-    *, ::before, ::after {{
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-        scroll-behavior: auto !important;
-    }}
-}}
+.kb-status-dot-green {
+  width: 8px; height: 8px; border-radius: 50%; background: #10B981; display: inline-block;
+}
+.kb-sidebar-nav-label {
+  font-size: 11px; font-weight: 600; color: #A1A1AA; letter-spacing: 0.06em; margin: 12px 0 6px 0;
+}
+.kb-sidebar-user-name { font-size: 14px; font-weight: 600; color: #FAFAFA; }
+.kb-sidebar-user-role { font-size: 12px; color: #A1A1AA; }
+.kb-sidebar-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #A1A1AA; margin-bottom: 16px; }
 </style>
-"""
+""").strip(), unsafe_allow_html=True)
 
-st.markdown(get_theme_css(st.session_state.get("theme", "System")), unsafe_allow_html=True)
+# ─── MAIN AREA STYLES (Phase 4) ───────────────────────────────────────────────
+st.markdown(textwrap.dedent("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [data-testid="stAppViewContainer"], .main {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.main .block-container {
+  max-width: 1100px;
+  padding-top: 3.5rem;
+  padding-left: 24px;
+  padding-right: 24px;
+  padding-bottom: 48px;
+  margin: 0 auto;
+}
+
+h1 { font-size: 28px; font-weight: 600; text-align: left; }
+h2 { font-size: 20px; font-weight: 600; text-align: left; }
+h3 { font-size: 16px; font-weight: 600; text-align: left; }
+p, span, div, li, label { font-size: 14px; text-align: left; }
+small, .stCaption, caption { font-size: 13px; text-align: left; }
+
+.main .stButton > button[kind="primary"],
+.main .stButton > button[data-testid="stBaseButton-primary"] {
+  background: #4F46E5; border: 1px solid #4F46E5; border-radius: 6px;
+}
+.main .stButton > button[kind="primary"] p,
+.main .stButton > button[kind="primary"] span,
+.main .stButton > button[data-testid="stBaseButton-primary"] p,
+.main .stButton > button[data-testid="stBaseButton-primary"] span {
+  color: #FFFFFF;
+}
+.main .stButton > button[kind="primary"]:hover,
+.main .stButton > button[data-testid="stBaseButton-primary"]:hover {
+  background: #4338CA; border-color: #4338CA;
+}
+
+[data-testid="stTabs"] [role="tablist"] { gap: 24px; }
+button[data-baseweb="tab"] { padding-top: 8px; padding-bottom: 8px; }
+
+/* Status pills and custom block rules (Phase 5) */
+.kb-receipt-card {
+  background: var(--subtle); border: 1px solid var(--border);
+  border-left: 3px solid #10B981; border-radius: 6px; padding: 14px 18px; margin: 14px 0;
+}
+.kb-notice-banner {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid #F59E0B; border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; color: var(--text-2);
+}
+.kb-brand-box {
+  width: 24px; height: 24px; border-radius: 4px; background: #1F1F23;
+  display: flex; align-items: center; justify-content: center; color: #FAFAFA;
+}
+.kb-brand-text-white {
+  font-size: 16px; font-weight: 600; color: #FAFAFA;
+}
+
+.kb-pill {
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 999px;
+  padding: 2px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.kb-pill-draft {
+  background: var(--subtle);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.kb-pill-info {
+  background: var(--pill-info-bg);
+  color: var(--pill-info-text);
+}
+.kb-pill-success {
+  background: rgba(16, 185, 129, 0.12);
+  color: #10B981;
+}
+.kb-pill-warning {
+  background: rgba(245, 158, 11, 0.12);
+  color: #F59E0B;
+}
+
+.kb-dot-success { background: #10B981; }
+.kb-dot-warning { background: #F59E0B; }
+.kb-dot-info    { background: #4F46E5; }
+.kb-dot-muted   { background: var(--muted); }
+
+.kb-top-navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 20px;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--surface);
+}
+.kb-nav-brand { display: flex; align-items: center; gap: 8px; }
+.kb-brand-logo {
+  width: 24px; height: 24px; border-radius: 4px; background: var(--subtle);
+  display: flex; align-items: center; justify-content: center; color: var(--text);
+}
+.kb-brand-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.kb-brand-sub { font-size: 12px; color: var(--text-2); margin-left: 4px; }
+.kb-nav-steps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.kb-step-connector { width: 10px; height: 1px; background: var(--border); }
+.kb-nav-step-item {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 500;
+  color: var(--muted); padding: 3px 7px; border-radius: 4px;
+}
+.kb-nav-step-item.active {
+  background: var(--subtle); color: var(--text); font-weight: 600; border: 1px solid var(--border);
+}
+.kb-nav-step-item.done { color: var(--text); }
+.kb-step-num {
+  display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+  border-radius: 3px; font-size: 11px; font-weight: 600; background: var(--subtle); color: var(--text);
+}
+.kb-nav-persona {
+  display: flex; align-items: center; gap: 6px; background: var(--subtle);
+  border: 1px solid var(--border); padding: 3px 10px; border-radius: 4px; font-size: 13px; color: var(--text);
+}
+.kb-avatar-chip {
+  width: 18px; height: 18px; border-radius: 3px; background: var(--border);
+  color: var(--text); font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+}
+
+.kb-plain-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0 14px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.kb-plain-table th {
+  background: var(--subtle);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12px;
+  padding: 9px 13px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.kb-plain-table td {
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 13px;
+  vertical-align: top;
+  background: var(--surface);
+}
+.kb-plain-table tr:last-child td { border-bottom: none; }
+</style>
+""").strip(), unsafe_allow_html=True)
+
+# ─── NATIVE THEME VARIABLES (Phase 5) ─────────────────────────────────────────
+def get_theme_vars() -> str:
+    if not hasattr(st, "context") or not hasattr(st.context, "theme"):
+        raise RuntimeError("st.context.theme does not exist")
+    theme_type = getattr(st.context.theme, "type", None)
+    is_dark = str(theme_type).lower() == "dark"
+    if is_dark:
+        return textwrap.dedent("""
+        <style>
+        :root {
+          --surface: #121215;
+          --subtle: #18181B;
+          --border: #27272A;
+          --divider: #1F1F23;
+          --text: #FAFAFA;
+          --text-2: #A1A1AA;
+          --muted: #71717A;
+          --pill-info-bg: #1E1B4B;
+          --pill-info-text: #A5B4FC;
+        }
+        </style>
+        """).strip()
+    else:
+        return textwrap.dedent("""
+        <style>
+        :root {
+          --surface: #FFFFFF;
+          --subtle: #F8FAFC;
+          --border: #E4E4E7;
+          --divider: #F1F5F9;
+          --text: #09090B;
+          --text-2: #52525B;
+          --muted: #A1A1AA;
+          --pill-info-bg: #EEF2FF;
+          --pill-info-text: #4F46E5;
+        }
+        </style>
+        """).strip()
+
+st.markdown(get_theme_vars(), unsafe_allow_html=True)
 
 
 # ─── INLINE SVG HELPERS ───────────────────────────────────────────────────────
@@ -1056,76 +385,74 @@ def render_file_row(filename: str, size_bytes: int) -> str:
         size_str = f"{size_bytes / 1024:.1f} KB"
     else:
         size_str = f"{size_bytes / (1024*1024):.1f} MB"
-    return f"""
-    <div class="kb-file-row">
-        <div class="kb-file-info">
+    return textwrap.dedent(f"""
+    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px;font-size:13px;color:var(--text);">
+        <div style="display:flex;align-items:center;gap:8px;">
             {icon_svg("file", 13)}
-            <span class="kb-file-ext-chip">{ext}</span>
+            <span style="font-family:monospace;font-size:11px;font-weight:600;background:var(--surface);color:var(--text);padding:1px 5px;border-radius:3px;border:1px solid var(--border);">{ext}</span>
             <span style="font-weight:500;">{filename}</span>
         </div>
-        <span class="kb-file-size">{size_str}</span>
+        <span style="font-size:12px;color:var(--text-2);">{size_str}</span>
     </div>
-    """
+    """).strip()
 
 
 def render_citation(source: str, excerpt: str) -> str:
-    """Structured citation block: monospace source tag + styled excerpt."""
+    """Structured citation block: thin left border, monospace 13px text, file name above as a small label."""
     if not excerpt:
         return ""
-    return f"""
-    <div class="kb-citation">
-        <div class="kb-citation-header">
-            <span class="kb-citation-tag">SOURCE</span>
-            <span class="kb-citation-source">{source}</span>
-        </div>
-        <div class="kb-citation-body">"{excerpt}"</div>
+    clean_excerpt = redact_sensitive_info(excerpt)
+    return textwrap.dedent(f"""
+    <div style="border-left:2px solid var(--border);padding:3px 0 3px 10px;margin:6px 0;background:transparent;">
+        <div style="font-size:11px;font-family:monospace;color:var(--text-2);margin-bottom:2px;">{source}</div>
+        <div style="font-size:13px;font-family:monospace;color:var(--text);line-height:1.45;">"{clean_excerpt}"</div>
     </div>
-    """
+    """).strip()
 
 
 def render_audit_entry(entry: dict) -> str:
     """Structured audit log row with monospace timestamp."""
-    status_color = "var(--status-success-text)" if "Approved" in entry.get("action", "") else "var(--status-danger-text)"
-    return f"""
-    <div class="kb-audit-entry">
-        <span class="kb-audit-time">{entry.get('timestamp', '')}</span>
-        <span class="kb-audit-who">{entry.get('who', '')}</span>
-        <span class="kb-audit-action" style="color:{status_color};">{entry.get('action', '')}</span>
-        <span class="kb-audit-reason">{entry.get('reason', '')}</span>
+    status_color = "var(--text)"
+    action_text = entry.get('action', '')
+    return textwrap.dedent(f"""
+    <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">
+        <span style="font-family:monospace;font-size:12px;color:var(--text-2);width:150px;">{entry.get('timestamp', '')}</span>
+        <span style="font-weight:600;width:100px;">{entry.get('who', '')}</span>
+        <span style="font-weight:500;width:180px;">{action_text}</span>
+        <span style="color:var(--text-2);flex:1;">{entry.get('reason', '')}</span>
     </div>
-    """
+    """).strip()
 
 
 def render_receipt_card(name: str, timestamp: str, project: str, employee: str) -> str:
     """Post-acknowledgment signed receipt card."""
-    return f"""
+    return textwrap.dedent(f"""
     <div class="kb-receipt-card">
-        <div class="kb-receipt-header">
-            <span class="kb-receipt-badge">
-                {icon_svg("check", 14)} Receipt acknowledged
-            </span>
-            <span class="kb-receipt-timestamp">{timestamp}</span>
+        <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:10px;">
+            <span class="kb-pill kb-pill-success">Receipt acknowledged</span>
+            <span style="font-family:monospace;font-size:12px;color:var(--text-2);">{timestamp}</span>
         </div>
-        <div class="kb-receipt-body">
-            <div class="kb-receipt-meta">
-                <span class="kb-receipt-label">Successor</span>
-                <span class="kb-receipt-value">{name}</span>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+            <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-2);">Successor</span>
+                <span style="color:var(--text);font-weight:500;">{name}</span>
             </div>
-            <div class="kb-receipt-meta">
-                <span class="kb-receipt-label">Knowledge holder</span>
-                <span class="kb-receipt-value">{employee}</span>
+            <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-2);">Knowledge holder</span>
+                <span style="color:var(--text);font-weight:500;">{employee}</span>
             </div>
-            <div class="kb-receipt-meta">
-                <span class="kb-receipt-label">Project scope</span>
-                <span class="kb-receipt-value">{project}</span>
+            <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-2);">Project scope</span>
+                <span style="color:var(--text);font-weight:500;">{project}</span>
             </div>
-            <div class="kb-receipt-meta">
-                <span class="kb-receipt-label">Status</span>
-                <span class="kb-receipt-value" style="color:var(--status-success-text);">Handover complete</span>
+            <div style="display:flex;justify-content:space-between;font-size:13px;">
+                <span style="color:var(--text-2);">Status</span>
+                <span style="font-weight:500;">Handover complete</span>
             </div>
         </div>
     </div>
-    """
+    """).strip()
+
 
 
 # ─── DEMO DATA ────────────────────────────────────────────────────────────────
@@ -1445,63 +772,72 @@ Direct TAM contact: Linda Park (linda.park@aws-tam.example.com).
 
 # ─── COMPONENT HELPERS ────────────────────────────────────────────────────────
 def source_badge(source_type: str) -> str:
-    badges = {
-        "file":   f'<span class="badge badge-neutral">{icon_svg("file")} File</span>',
-        "github": f'<span class="badge badge-neutral">{icon_svg("repo")} Repository</span>',
-        "text":   f'<span class="badge badge-neutral">{icon_svg("text")} Notes</span>',
+    st_type = str(source_type).lower()
+    labels = {
+        "file": "File",
+        "github": "Repository",
+        "text": "Notes",
     }
-    return badges.get(source_type, f'<span class="badge badge-neutral">{icon_svg("file")} Source</span>')
+    label = labels.get(st_type, "Source")
+    return f'<span class="kb-pill kb-pill-draft">{label}</span>'
 
 
 def confidence_badge(confidence: str) -> str:
-    badges = {
-        "HIGH":   '<span class="badge badge-success">High confidence</span>',
-        "MEDIUM": '<span class="badge badge-warning">Medium confidence</span>',
-        "LOW":    '<span class="badge badge-danger">Low confidence</span>',
-    }
-    return badges.get(confidence, '<span class="badge badge-warning">Medium confidence</span>')
+    c = str(confidence).upper()
+    if c == "HIGH":
+        return '<span class="kb-pill kb-pill-success">High confidence</span>'
+    elif c == "LOW":
+        return '<span class="kb-pill kb-pill-draft">Low confidence</span>'
+    else:
+        return '<span class="kb-pill kb-pill-warning">Medium confidence</span>'
 
 
-def render_stat_card(label: str, number: str, accent_color: str = "var(--accent)") -> str:
-    """Refined metric card with human craft and distinct accent indicator."""
-    return f"""
-    <div class="kb-stat-card">
-        <div class="kb-stat-indicator" style="background:{accent_color};"></div>
-        <div class="kb-stat-label">
-            <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:{accent_color};"></span>
-            {label}
-        </div>
-        <div class="kb-stat-number">{number}</div>
+def render_stat_card(label: str, number: str) -> str:
+    """Clean flat metric card."""
+    return textwrap.dedent(f"""
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px 16px;margin-bottom:8px;">
+        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;margin-bottom:4px;">{label}</div>
+        <div style="font-size:20px;font-weight:600;color:var(--text);">{number}</div>
     </div>
-    """
+    """).strip()
 
 
 def step_indicator(current_page: str):
-    """Authoritative top workflow navigation bar with human craft."""
-    pages = [
-        ("connect",     "1", "Connect Sources"),
-        ("reconstruct", "2", "Reconstruct"),
-        ("employee",    "3", "Employee Hub"),
-        ("review",      "4", "Manager Review"),
-        ("handover",    "5", "Handover Package"),
-    ]
+    """Authoritative top workflow navigation bar adapted by role."""
+    role = st.session_state.get("auth_role", "Manager")
+    if role == "Employee":
+        pages = [
+            ("connect",        "1", "Connect"),
+            ("reconstruct",    "2", "Reconstruct"),
+            ("employee",       "3", "Verify"),
+            ("employee_notes", "4", "My notes"),
+        ]
+    elif role == "Successor":
+        pages = [
+            ("successor_handover", "1", "Technical handover"),
+        ]
+    else:  # Manager
+        pages = [
+            ("review",   "1", "Review"),
+            ("handover", "2", "Handover"),
+            ("audit",    "3", "Audit log"),
+        ]
+
     page_order = [p[0] for p in pages]
     current_idx = page_order.index(current_page) if current_page in page_order else 0
 
-    emp_name = st.session_state.employee_name or ("Sarah Chen" if st.session_state.is_demo or not st.session_state.api_key else "")
-    project_scope = st.session_state.project_role or ("PayFlow" if st.session_state.is_demo or not st.session_state.api_key else "")
-    initials = "".join([part[0] for part in emp_name.split() if part])[:2].upper() if emp_name else "HB"
+    user_name = st.session_state.get("auth_name") or "User"
+    initials = "".join([part[0] for part in user_name.split() if part])[:2].upper() if user_name else "HB"
 
-    html = '<div class="kb-top-navbar">'
-    html += '<div class="kb-nav-brand">'
-    html += f'<div class="kb-brand-logo">{icon_svg("baton", 17)}</div>'
-    html += '<div class="kb-brand-text">'
-    html += '<span class="kb-brand-title">Baton</span>'
-    html += '<span class="kb-brand-sub">Handover Engine</span>'
-    html += '</div>'
-    html += '</div>'
-
-    html += '<div class="kb-nav-steps">'
+    html = textwrap.dedent(f"""
+    <div class="kb-top-navbar">
+        <div class="kb-nav-brand">
+            <div class="kb-brand-logo">{icon_svg("baton", 14)}</div>
+            <span class="kb-brand-title">Baton</span>
+            <span class="kb-brand-sub">{role} workspace</span>
+        </div>
+        <div class="kb-nav-steps">
+    """).strip()
     for i, (pid, num, title) in enumerate(pages):
         if i < current_idx:
             cls = "done"
@@ -1516,98 +852,239 @@ def step_indicator(current_page: str):
         if i < len(pages) - 1:
             html += '<div class="kb-step-connector"></div>'
     html += '</div>'
-
-    if emp_name:
-        html += f'<div class="kb-nav-persona"><span class="kb-avatar-chip">{initials}</span> <span>{emp_name}</span> <span style="opacity:0.4;">➔</span> <span style="color:var(--text-primary); font-weight:600;">{project_scope}</span></div>'
-    else:
-        status_label = "Demo mode active" if st.session_state.is_demo or not st.session_state.api_key else "Gemini active"
-        html += f'<div class="kb-nav-status">{status_label}</div>'
+    html += f'<div class="kb-nav-persona"><span class="kb-avatar-chip">{initials}</span> <span>{user_name}</span> <span style="opacity:0.6;">&rarr;</span> <span style="font-weight:600;">{role}</span></div>'
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
 
 
+def render_role_status_line(role: str):
+    """Renders single prominent status line for the role's current progress."""
+    profile = st.session_state.get("knowledge_profile")
+    total_verifiable = len(profile.get("decisions", [])) + len(profile.get("risks", [])) if profile else 0
+    verified = len(st.session_state.get("employee_verifications", {}))
+    total_gaps = len(profile.get("unresolved", [])) if profile else 0
+    answered = sum(
+        1 for q in (profile.get("unresolved", []) if profile else [])
+        if st.session_state.get("employee_gap_answers", {}).get(q.get("question", ""), "").strip()
+    )
+    approvals = st.session_state.get("approvals", {})
+    all_approved = sum(1 for v in approvals.values() if v is True) >= 5
+    has_handover = bool(st.session_state.get("manager_handover") and st.session_state.get("newhire_handover"))
+    has_ack = bool(st.session_state.get("acknowledgement"))
+
+    if role == "Manager":
+        if not profile:
+            st_text, dot_cls = "Waiting for employee to upload sources", "kb-dot-muted"
+        elif verified < total_verifiable or answered < total_gaps:
+            st_text, dot_cls = "Waiting for employee input", "kb-dot-warning"
+        elif not all_approved:
+            st_text, dot_cls = "Ready for manager review", "kb-dot-info"
+        elif not has_handover:
+            st_text, dot_cls = "Ready for handover generation", "kb-dot-info"
+        else:
+            st_text, dot_cls = "Handover available", "kb-dot-success"
+    elif role == "Employee":
+        if not profile:
+            st_text, dot_cls = "Waiting for knowledge reconstruction", "kb-dot-muted"
+        elif verified < total_verifiable or answered < total_gaps:
+            st_text, dot_cls = "Action required: verify findings and answer gaps", "kb-dot-warning"
+        elif not all_approved:
+            st_text, dot_cls = "Ready for manager review", "kb-dot-info"
+        else:
+            st_text, dot_cls = "Handover package approved", "kb-dot-success"
+    elif role == "Successor":
+        if not has_handover or not all_approved:
+            st_text, dot_cls = "Handover not approved yet", "kb-dot-warning"
+        elif not has_ack:
+            st_text, dot_cls = "Handover available — acknowledge receipt", "kb-dot-info"
+        else:
+            st_text, dot_cls = "Handover acknowledged", "kb-dot-success"
+    else:
+        st_text, dot_cls = "Active", "kb-dot-info"
+
+    st.markdown(textwrap.dedent(f"""
+    <div style="background:var(--subtle); border:1px solid var(--border); border-radius:6px; padding:8px 14px; margin-bottom:14px; display:flex; align-items:center; gap:8px;">
+        <span class="kb-dot {dot_cls}" style="width:8px; height:8px; border-radius:50%; display:inline-block;"></span>
+        <span style="font-size:13px; color:var(--text); font-weight:500;">Status: <b>{st_text}</b></span>
+    </div>
+    """).strip(), unsafe_allow_html=True)
+
+
+def render_login_page():
+    """Renders the login page with demo accounts guide."""
+    col_pad1, col_center, col_pad2 = st.columns([1, 2, 1])
+    with col_center:
+        st.markdown(textwrap.dedent("""
+            <div style="max-width:440px;margin:24px auto 16px auto;text-align:center;">
+              <div style="font-size:28px;font-weight:600;color:var(--text);line-height:1.2;">Baton</div>
+              <div style="font-size:14px;color:var(--text-2);margin-top:4px;">Institutional knowledge preservation and handover platform</div>
+            </div>
+        """).strip(), unsafe_allow_html=True)
+
+        with st.container(border=True):
+            with st.form("login_form", clear_on_submit=False):
+                st.markdown(textwrap.dedent("""
+                    <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:8px;">Sign in to your account</div>
+                """).strip(), unsafe_allow_html=True)
+                if is_locked():
+                    sec = get_lockout_remaining()
+                    st.error(f"Too many wrong attempts. Login locked for {sec} second(s).")
+                username_input = st.text_input("Username", placeholder="e.g. manager, sarah, marcus")
+                password_input = st.text_input("Password", type="password", placeholder="Enter password")
+                submit_login = st.form_submit_button("Sign in", type="primary", use_container_width=True, disabled=is_locked())
+                if submit_login:
+                    ok, msg, user = authenticate(username_input, password_input)
+                    if ok and user:
+                        st.session_state.authenticated = True
+                        st.session_state.auth_username = user["username"]
+                        st.session_state.auth_role = user["role"]
+                        st.session_state.auth_name = user["name"]
+                        if user["role"] == "Employee":
+                            st.session_state.employee_name = user["name"]
+                        notice = load_into_session(st.session_state)
+                        if notice:
+                            st.session_state.state_notice = notice
+                        log_audit_entry(st.session_state, user["username"], "Login successful")
+                        if user["role"] == "Manager":
+                            st.session_state.page = "review"
+                        elif user["role"] == "Employee":
+                            st.session_state.page = "employee"
+                        elif user["role"] == "Successor":
+                            st.session_state.page = "successor_handover"
+                        st.rerun()
+                    else:
+                        log_audit_entry(st.session_state, (username_input or "").strip() or "anonymous", "Failed login attempt", reason=msg)
+                        st.error(msg)
+
+        st.markdown(textwrap.dedent("""
+            <div style="background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-top:16px;font-size:13px;color:var(--text-2);">
+              <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Demo accounts for evaluation (synthetic data)</div>
+              <div style="margin-bottom:3px;"><code style="font-family:monospace;">manager</code> / <code>Manager@123</code> &rarr; Manager</div>
+              <div style="margin-bottom:3px;"><code style="font-family:monospace;">sarah</code> / <code>Sarah@123</code> &rarr; Employee (Sarah Chen)</div>
+              <div><code style="font-family:monospace;">marcus</code> / <code>Marcus@123</code> &rarr; Successor (Marcus Vance)</div>
+            </div>
+        """).strip(), unsafe_allow_html=True)
+
+
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 with st.sidebar:
-    emp_name = st.session_state.employee_name or ("Sarah Chen" if st.session_state.is_demo or not st.session_state.api_key else "")
-    project_scope = st.session_state.project_role or ("Senior Backend Engineer &bull; PayFlow" if st.session_state.is_demo or not st.session_state.api_key else "")
-    initials = "".join([part[0] for part in emp_name.split() if part])[:2].upper() if emp_name else "HB"
-
-    st.markdown(f"""
-    <div class="kb-sidebar-header">
-        <div style="display:flex; align-items:center; gap:8px;">
-            <div class="kb-brand-logo" style="width:26px; height:26px;">{icon_svg("baton", 14)}</div>
-            <div class="kb-brand-title" style="font-size:1.15rem;">Baton</div>
+    # 1. Baton logo and name
+    st.markdown(textwrap.dedent(f"""
+        <div style="display:flex;align-items:center;gap:8px;padding:4px 0 12px 0;margin-bottom:12px;">
+          <div class="kb-brand-box">
+            {icon_svg("baton", 14)}
+          </div>
+          <span class="kb-brand-text-white">Baton</span>
         </div>
-        <div class="kb-sidebar-subtitle">Ensure nothing gets lost when teammates move on.</div>
-    </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
 
-    if emp_name:
-        st.markdown(f"""
-        <div style="background:var(--bg-subtle); border:1px solid var(--border-color); border-radius:var(--radius); padding:10px 12px; margin-bottom:1rem; box-shadow:var(--card-shadow);">
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-                <span class="kb-avatar-chip">{initials}</span>
-                <div style="font-size:0.83rem; font-weight:600; color:var(--text-primary);">{emp_name}</div>
-            </div>
-            <div style="font-size:0.75rem; color:var(--text-secondary); line-height:1.4;">{project_scope}</div>
-            <div style="display:flex; align-items:center; gap:5px; margin-top:6px; font-size:0.72rem; color:var(--status-success-text); font-weight:600;">
-                <span style="width:6px; height:6px; border-radius:50%; background:var(--status-success-text); display:inline-block;"></span>
-                Active Handover Dossier
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+    if st.session_state.get("authenticated"):
+        auth_name = st.session_state.get("auth_name") or ""
+        auth_role = st.session_state.get("auth_role") or ""
+        auth_user = st.session_state.get("auth_username") or ""
 
-    if st.session_state.api_key:
-        st.markdown(
-            '<div class="kb-banner" style="margin-bottom:0.75rem; border-left:3px solid var(--status-success-text); background:var(--status-success-bg); color:var(--status-success-text); font-weight:500;">'
-            f'{icon_svg("shield", 12)} Gemini API active'
-            '</div>',
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            '<div class="kb-banner" style="margin-bottom:0.75rem;">'
-            'Demo mode active (Sarah Chen profile loaded)'
-            '</div>',
-            unsafe_allow_html=True
-        )
+        # 2. User block
+        if auth_name:
+            st.markdown(textwrap.dedent(f"""
+                <div style="padding:4px 0 8px 0;margin-bottom:8px;">
+                  <div class="kb-sidebar-user-name">{auth_name}</div>
+                  <div class="kb-sidebar-user-role">{auth_role}</div>
+                </div>
+            """).strip(), unsafe_allow_html=True)
 
-    st.markdown('<div class="kb-sidebar-section-title">Workflow stages</div>', unsafe_allow_html=True)
+        # 3. Status line: 8px green dot followed by Gemini API connected in plain text. No box.
+        if st.session_state.get("api_key"):
+            st.markdown(textwrap.dedent("""
+                <div class="kb-sidebar-status">
+                  <span class="kb-status-dot-green"></span>
+                  <span>Gemini API connected</span>
+                </div>
+            """).strip(), unsafe_allow_html=True)
 
-    nav_pages = [
-        ("connect", "1. Connect Sources"),
-        ("reconstruct", "2. Reconstruct"),
-        ("employee", "3. Employee Hub"),
-        ("review", "4. Manager Review"),
-        ("handover", "5. Handover Package"),
-    ]
-    for page_id, page_label in nav_pages:
-        is_active = st.session_state.page == page_id
-        if st.button(
-            page_label,
-            use_container_width=True,
-            type="primary" if is_active else "secondary",
-            disabled=(page_id in ("reconstruct", "employee", "review", "handover") and
-                      st.session_state.knowledge_profile is None and
-                      not st.session_state.is_demo)
-        ):
-            st.session_state.page = page_id
+        # 4. Small uppercase section label NAVIGATION at 11px
+        st.markdown(textwrap.dedent("""
+            <div class="kb-sidebar-nav-label">NAVIGATION</div>
+        """).strip(), unsafe_allow_html=True)
+
+        # 5. Nav buttons
+        if auth_role == "Manager":
+            nav_pages = [
+                ("review",   "Manager review"),
+                ("handover", "Handover package"),
+                ("audit",    "Audit log"),
+            ]
+        elif auth_role == "Employee":
+            nav_pages = [
+                ("connect",        "Connect sources"),
+                ("reconstruct",    "Reconstruct"),
+                ("employee",       "Employee hub"),
+                ("employee_notes", "My notes"),
+            ]
+        elif auth_role == "Successor":
+            nav_pages = [
+                ("successor_handover", "Technical handover"),
+            ]
+        else:
+            nav_pages = []
+
+        for page_id, page_label in nav_pages:
+            is_active = st.session_state.page == page_id
+            disabled = False
+            if auth_role == "Employee" and page_id in ("reconstruct", "employee", "employee_notes") and not st.session_state.knowledge_profile:
+                disabled = True
+            elif auth_role == "Employee" and page_id == "employee_notes" and not st.session_state.employee_handover:
+                disabled = True
+            elif auth_role == "Manager" and page_id in ("handover",) and not st.session_state.manager_handover:
+                disabled = True
+            if st.button(
+                page_label,
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+                disabled=disabled,
+                key=f"nav_{page_id}"
+            ):
+                st.session_state.page = page_id
+                st.rerun()
+
+        # 6. Sign out button at bottom: 1px border, transparent background
+        st.markdown('<div class="kb-signout" style="margin-top:24px;">', unsafe_allow_html=True)
+        if st.button("Sign out", key="btn_sign_out_sidebar", use_container_width=True):
+            log_audit_entry(st.session_state, auth_user, "Logged out")
+            logout(st.session_state)
+            st.session_state.page = "connect"
             st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="kb-sidebar-section-title">Interface theme</div>', unsafe_allow_html=True)
-    theme_choice = st.radio(
-        "Theme mode:",
-        ["System", "Light", "Dark"],
-        index=["System", "Light", "Dark"].index(st.session_state.get("theme", "System")),
-        horizontal=True,
-        label_visibility="collapsed",
-        key="theme_selector",
-    )
-    if theme_choice != st.session_state.get("theme"):
-        st.session_state.theme = theme_choice
-        st.rerun()
 
-    st.markdown('<div class="kb-sidebar-footer">Baton Knowledge Platform<br/>Institutional context preservation</div>', unsafe_allow_html=True)
+
+# ─── AUTHENTICATION GATE ───────────────────────────────────────────────────────
+if not st.session_state.get("authenticated"):
+    render_login_page()
+    st.stop()
+
+# ─── ROLE-BASED ACCESS CONTROL ────────────────────────────────────────────────
+ROLE_PERMISSIONS = {
+    "Manager":   ["review", "handover", "audit"],
+    "Employee":  ["connect", "reconstruct", "employee", "employee_notes"],
+    "Successor": ["successor_handover"],
+}
+
+_current_role = st.session_state.get("auth_role", "")
+_allowed_pages = ROLE_PERMISSIONS.get(_current_role, [])
+
+if st.session_state.page not in _allowed_pages:
+    st.error("Access denied for your role.")
+    st.stop()
+
+# Log page views once per navigation
+_last_page = st.session_state.get("_last_logged_page", "")
+if _last_page != st.session_state.page:
+    log_audit_entry(st.session_state, st.session_state.get("auth_username", "user"), f"Viewed page: {st.session_state.page}")
+    st.session_state["_last_logged_page"] = st.session_state.page
+
+if st.session_state.get("state_notice"):
+    st.info(st.session_state.state_notice)
+    st.session_state.state_notice = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1616,18 +1093,13 @@ with st.sidebar:
 if st.session_state.page == "connect":
     step_indicator("connect")
 
-    if not st.session_state.api_key:
-        st.markdown("""
-        <div class="kb-banner">
-            <b>Demo mode active:</b> Exploring the 5-stage handover journey with <b>Sarah Chen</b> (PayFlow microservice). All views, verifications, and export packages are functional.
-        </div>
-        """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="kb-banner-tip">
-        <b>💡 Why Baton?</b> 70% of vital engineering decisions, vendor quirks, and unwritten operational rules aren't in the README. Baton distills them into a verified, peer-reviewed handover package before teammates move on.
+
+    st.markdown(textwrap.dedent("""
+    <div class="kb-notice-banner">
+      Connect documents, a repository, or transition notes. Baton extracts key decisions and risks for verification and review.
     </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
 
     col_left, col_right = st.columns([7, 5], gap="large")
 
@@ -1686,13 +1158,18 @@ if st.session_state.page == "connect":
         st.markdown('<div class="kb-section-title">2. Scope and departing context</div>', unsafe_allow_html=True)
 
         col_p1, col_p2 = st.columns(2)
+        _emp_readonly = st.session_state.get("auth_role") == "Employee"
+        if _emp_readonly and st.session_state.get("auth_name"):
+            st.session_state.employee_name = st.session_state.auth_name
         with col_p1:
             employee_name = st.text_input(
                 "Departing employee name",
                 value=st.session_state.employee_name,
                 placeholder="e.g. Sarah Chen",
+                disabled=_emp_readonly,
             )
-            st.session_state.employee_name = employee_name
+            if not _emp_readonly:
+                st.session_state.employee_name = employee_name
 
         with col_p2:
             project_role = st.text_input(
@@ -1703,62 +1180,66 @@ if st.session_state.page == "connect":
             st.session_state.project_role = project_role
 
     with col_right:
-        emp_display = st.session_state.employee_name.strip() or ("Sarah Chen" if not st.session_state.api_key else "Pending input")
-        role_display = st.session_state.project_role.strip() or ("Senior Backend Engineer, PayFlow" if not st.session_state.api_key else "Pending input")
-        initials = "".join([part[0] for part in emp_display.split() if part])[:2].upper() if emp_display else "HB"
+        emp_raw = (st.session_state.get("employee_name") or "").strip()
+        emp_display = emp_raw if emp_raw else '<span style="color:var(--muted);">Not provided</span>'
+
+        role_raw = (st.session_state.get("project_role") or "").strip()
+        role_display = role_raw if role_raw else '<span style="color:var(--muted);">Not provided</span>'
 
         file_count = len(st.session_state.uploaded_files) if st.session_state.uploaded_files else 0
+        file_display = f"{file_count} uploaded" if file_count > 0 else '<span style="color:var(--muted);">Not provided</span>'
+
         has_gh = bool(st.session_state.github_url.strip())
-        text_len = len(st.session_state.pasted_text.strip())
+        gh_display = st.session_state.github_url.strip() if has_gh else '<span style="color:var(--muted);">Not provided</span>'
+
+        notes_raw = st.session_state.pasted_text.strip()
+        notes_display = f"{len(notes_raw)} chars" if notes_raw else '<span style="color:var(--muted);">Not provided</span>'
+
+        has_sources = bool(
+            (st.session_state.uploaded_files) or
+            (st.session_state.github_url.strip()) or
+            (st.session_state.pasted_text.strip())
+        )
+
+        if st.session_state.get("knowledge_profile"):
+            status_pill_html = '<span class="kb-pill kb-pill-success">Verified</span>'
+        elif has_sources:
+            status_pill_html = '<span class="kb-pill kb-pill-info">Ready for analysis</span>'
+        else:
+            status_pill_html = '<span class="kb-pill kb-pill-draft">Draft</span>'
 
         preview_html = textwrap.dedent(f"""
-        <div class="kb-panel">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.9rem;">
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span class="kb-avatar-chip" style="width:24px; height:24px; font-size:0.7rem;">{initials}</span>
-                    <h3 style="margin:0; font-size:1.0rem; font-weight:600; color:var(--text-primary);">Staged handover dossier</h3>
-                </div>
-                <span class="badge badge-success">Ready for analysis</span>
-            </div>
-
-            <p style="font-size:0.83rem; color:var(--text-secondary); margin-bottom:0.85rem; line-height:1.5;">
-                Extracts tacit architectural decisions, production landmines, and undocumented operational context into an actionable package for your successor.
-            </p>
-
-            <div class="kb-meta-list">
-                <div class="kb-meta-row">
-                    <span class="kb-meta-key">Departing Engineer</span>
-                    <span class="kb-meta-val">{emp_display}</span>
-                </div>
-                <div class="kb-meta-row">
-                    <span class="kb-meta-key">Project Scope</span>
-                    <span class="kb-meta-val">{role_display}</span>
-                </div>
-                <div class="kb-meta-row">
-                    <span class="kb-meta-key">Source Documents</span>
-                    <span class="kb-meta-val">{file_count} uploaded</span>
-                </div>
-                <div class="kb-meta-row">
-                    <span class="kb-meta-key">Code Repository</span>
-                    <span class="kb-meta-val">{'Connected' if has_gh else 'None'}</span>
-                </div>
-                <div class="kb-meta-row">
-                    <span class="kb-meta-key">Informal Notes</span>
-                    <span class="kb-meta-val">{text_len} chars</span>
-                </div>
-            </div>
-
-            <div style="border-top:1px solid var(--border-color); margin-top:0.85rem; padding-top:0.85rem;">
-                <div style="font-size:0.72rem; font-weight:600; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.45rem;">Handover Deliverables</div>
-                <div style="font-size:0.82rem; line-height:1.6; color:var(--text-secondary);">
-                    • Architectural decision log with citations<br/>
-                    • Production risks and dependency landmines<br/>
-                    • Employee verification & tribal wisdom addendum<br/>
-                    • Multi-role handover dossier (Manager & Successor)
-                </div>
-            </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <span style="font-size:16px;font-weight:600;color:var(--text);">Staged handover dossier</span>
+            {status_pill_html}
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:13px;">
+            <tbody>
+              <tr style="border-bottom:1px solid var(--divider);">
+                <td style="padding:8px 0;color:var(--text-2);width:40%;">Departing engineer</td>
+                <td style="padding:8px 0;color:var(--text);font-weight:500;">{emp_display}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--divider);">
+                <td style="padding:8px 0;color:var(--text-2);">Project scope</td>
+                <td style="padding:8px 0;color:var(--text);font-weight:500;">{role_display}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--divider);">
+                <td style="padding:8px 0;color:var(--text-2);">Source documents</td>
+                <td style="padding:8px 0;color:var(--text);font-weight:500;">{file_display}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--divider);">
+                <td style="padding:8px 0;color:var(--text-2);">Code repository</td>
+                <td style="padding:8px 0;color:var(--text);font-weight:500;">{gh_display}</td>
+              </tr>
+              <tr>
+                <td style="padding:8px 0;color:var(--text-2);">Notes</td>
+                <td style="padding:8px 0;color:var(--text);font-weight:500;">{notes_display}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        """)
+        """).strip()
         st.markdown(preview_html, unsafe_allow_html=True)
 
         has_sources = bool(
@@ -1833,7 +1314,9 @@ if st.session_state.page == "connect":
                     st.stop()
 
                 total_len = sum(len(s.get("content", "")) for s in all_sources)
+                _was_truncated = False
                 if total_len > 30000:
+                    _was_truncated = True
                     running = 0
                     trimmed = []
                     for s in all_sources:
@@ -1846,6 +1329,8 @@ if st.session_state.page == "connect":
                         trimmed.append({**s, "content": c})
                         running += len(c)
                     all_sources = trimmed
+                if _was_truncated:
+                    st.warning("Input was cut at 30,000 characters. Only the first part was analyzed.")
 
                 st.session_state.all_sources = all_sources
 
@@ -1854,7 +1339,8 @@ if st.session_state.page == "connect":
                         from utils.gemini_engine import analyze_sources
                         profile = analyze_sources(all_sources, st.session_state.api_key)
                         st.session_state.knowledge_profile = profile
-                        st.session_state.is_demo = False
+                        log_audit_entry(st.session_state, st.session_state.get("auth_username","user"), "Knowledge profile reconstructed")
+                        save_project_state(st.session_state)
                         st.session_state.page = "reconstruct"
                         st.rerun()
                     except Exception as e:
@@ -1873,46 +1359,62 @@ elif st.session_state.page == "reconstruct":
         st.error("No knowledge profile found. Please start by connecting sources.")
         st.stop()
 
-    if st.session_state.is_demo:
-        st.markdown("""
-        <div class="kb-banner">
-            <b>Demo mode:</b> Displaying AI reconstruction for <b>Sarah Chen</b> (PayFlow microservice). Inspect citations, confidence scores, and identified knowledge gaps below.
-        </div>
-        """, unsafe_allow_html=True)
+
 
     # Executive Hero Banner
-    st.markdown(f"""
+    st.markdown(textwrap.dedent(f"""
     <div class="kb-panel-hero">
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:0.75rem;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
             <div>
-                <h2 style="font-size:1.25rem; font-weight:700; color:var(--text-primary); margin:0 0 4px 0;">Reconstructed Knowledge Profile</h2>
-                <div style="color:var(--text-secondary); font-size:0.875rem;">
+                <h2 style="font-size:18px; font-weight:600; color:var(--text); margin:0 0 4px 0;">Reconstructed knowledge profile</h2>
+                <div style="color:var(--text-2); font-size:13px;">
                     <b>Departing:</b> {st.session_state.employee_name or 'Unknown'} &nbsp;|&nbsp;
-                    <b>Project Scope:</b> {st.session_state.project_role or 'Unknown'}
+                    <b>Project scope:</b> {st.session_state.project_role or 'Unknown'}
                 </div>
             </div>
-            <span class="badge badge-neutral">Citation-linked</span>
+            <span class="kb-status-dot-item" style="color:var(--text-2);"><span class="kb-dot" style="background-color:var(--accent);"></span>Citation-linked</span>
         </div>
-        <p style="font-size:0.9rem; line-height:1.6; color:var(--text-primary); margin-top:0.85rem; margin-bottom:0;">
+        <p style="font-size:14px; line-height:1.6; color:var(--text); margin-top:12px; margin-bottom:0;">
             {profile.get("summary", "")}
         </p>
     </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
 
-    # Stat Cards
-    st.markdown('<div class="kb-stat-grid">', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.markdown(render_stat_card("Core Decisions", str(len(profile.get("decisions", []))), "var(--accent)"), unsafe_allow_html=True)
-    with c2:
-        st.markdown(render_stat_card("Risks & Traps", str(len(profile.get("risks", []))), "var(--status-warning-text)"), unsafe_allow_html=True)
-    with c3:
-        st.markdown(render_stat_card("Knowledge Gaps", str(len(profile.get("unresolved", []))), "var(--status-danger-text)"), unsafe_allow_html=True)
-    with c4:
-        st.markdown(render_stat_card("Key Teammates", str(len(profile.get("contacts", []))), "var(--status-success-text)"), unsafe_allow_html=True)
-    with c5:
-        st.markdown(render_stat_card("Dependencies", str(len(profile.get("dependencies", []))), "#38BDF8"), unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Compact Summary Row with Dividers
+    dec_count = len(profile.get("decisions", []))
+    risk_count = len(profile.get("risks", []))
+    gap_count = len(profile.get("unresolved", []))
+    contact_count = len(profile.get("contacts", []))
+    dep_count = len(profile.get("dependencies", []))
+
+    st.markdown(textwrap.dedent(f"""
+    <div class="kb-summary-row">
+        <div class="kb-summary-item">
+            <span class="kb-summary-num">{dec_count}</span>
+            <span class="kb-summary-label">Decisions</span>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <span class="kb-summary-num">{risk_count}</span>
+            <span class="kb-summary-label">Risks</span>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <span class="kb-summary-num">{gap_count}</span>
+            <span class="kb-summary-label">Knowledge gaps</span>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <span class="kb-summary-num">{contact_count}</span>
+            <span class="kb-summary-label">Contacts</span>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <span class="kb-summary-num">{dep_count}</span>
+            <span class="kb-summary-label">Dependencies</span>
+        </div>
+    </div>
+    """).strip(), unsafe_allow_html=True)
 
     # Clean Solid Distribution Bar
     high_count = sum(1 for d in profile.get("decisions", []) if d.get("confidence") == "HIGH")
@@ -1923,87 +1425,121 @@ elif st.session_state.page == "reconstruct":
     med_pct = int((med_count / total_d) * 100)
     low_pct = 100 - high_pct - med_pct
 
-    st.markdown(f"""
-    <div style="background:var(--bg-subtle); border:1px solid var(--border-color); border-radius:var(--radius); padding:0.9rem 1.2rem; margin-bottom:1.5rem;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-            <span style="font-size:0.8rem; font-weight:600; color:var(--text-secondary);">Evidence confidence breakdown</span>
-            <span style="font-size:0.8rem; font-weight:500; color:var(--text-muted);">{high_pct}% High • {med_pct}% Medium • {low_pct}% Inferred</span>
+    st.markdown(textwrap.dedent(f"""
+    <div style="background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; margin-bottom:20px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-size:13px; font-weight:600; color:var(--text);">Evidence confidence breakdown</span>
+            <span style="font-size:13px; color:var(--text-2);">{high_pct}% High • {med_pct}% Medium • {low_pct}% Low</span>
         </div>
-        <div style="height:8px; border-radius:var(--radius-sm); display:flex; overflow:hidden; background:var(--border-color);">
-            <div style="width:{high_pct}%; background:#16A34A;" title="High confidence: {high_count}"></div>
-            <div style="width:{med_pct}%; background:#CA8A04;" title="Medium confidence: {med_count}"></div>
-            <div style="width:{low_pct}%; background:#DC2626;" title="Low confidence: {low_count}"></div>
+        <div style="height:6px; border-radius:4px; display:flex; overflow:hidden; background:var(--border);">
+            <div style="width:{high_pct}%; background:var(--success);" title="High confidence: {high_count}"></div>
+            <div style="width:{med_pct}%; background:var(--warning);" title="Medium confidence: {med_count}"></div>
+            <div style="width:{low_pct}%; background:var(--error);" title="Low confidence: {low_count}"></div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
 
     # Content Grid
     col_grid1, col_grid2 = st.columns([1, 1], gap="large")
 
     with col_grid1:
-        st.markdown('<div class="kb-section-title">Architectural Decision Log</div>', unsafe_allow_html=True)
-        for i, decision in enumerate(profile.get("decisions", [])):
+        st.markdown('<div class="kb-section-title">Architectural decisions</div>', unsafe_allow_html=True)
+        dec_rows = []
+        for decision in profile.get("decisions", []):
             conf = decision.get("confidence", "MEDIUM")
-            stype = decision.get("source_type", "file")
-            with st.expander(f"Decision #{i+1}: {decision.get('text', '')[:75]}...", expanded=(i < 2)):
-                st.markdown(f"""
-                <div class="kb-card kb-card-info">
-                    <p style="font-size:0.95rem; font-weight:600; color:var(--text-primary); margin-bottom:0.5rem;">{decision.get('text', '')}</p>
-                    <p>{source_badge(stype)} {confidence_badge(conf)} &nbsp;<span style="color:var(--text-muted); font-size:0.8rem;">Source: {decision.get('source', '')}</span></p>
-                </div>
-                """, unsafe_allow_html=True)
-                excerpt = decision.get("excerpt", "")
-                if excerpt:
-                    st.markdown(render_citation(decision.get("source", ""), excerpt), unsafe_allow_html=True)
+            excerpt = decision.get("excerpt", "")
+            cite_html = render_citation(decision.get("source", ""), excerpt) if excerpt else ""
+            dec_rows.append(textwrap.dedent(f"""
+            <tr>
+                <td>
+                    <div style="font-weight:600; margin-bottom:4px; color:var(--text);">{decision.get('text', '')}</div>
+                    {cite_html}
+                </td>
+                <td style="white-space:nowrap;">{confidence_badge(conf)}</td>
+                <td style="font-size:13px; color:var(--text-2); font-family:monospace;">{decision.get('source', '')}</td>
+            </tr>
+            """).strip())
+        dec_table_html = textwrap.dedent(f"""
+        <table class="kb-plain-table">
+            <thead>
+                <tr>
+                    <th style="width:55%;">Decision</th>
+                    <th style="width:25%;">Confidence</th>
+                    <th style="width:20%;">Source</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(dec_rows) if dec_rows else '<tr><td colspan="3" style="color:var(--text-2);">No decisions recorded.</td></tr>'}
+            </tbody>
+        </table>
+        """).strip()
+        st.markdown(dec_table_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="kb-section-title">Key Dependencies</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Key dependencies</div>', unsafe_allow_html=True)
         for dep in profile.get("dependencies", []):
-            st.markdown(f"""
+            st.markdown(textwrap.dedent(f"""
             <div class="kb-card">
                 <b>{dep.get('item', '')}</b> — {dep.get('description', '')}
-                <br/><small style="color:var(--text-muted);">Source citation: {dep.get('source', '')}</small>
+                <br/><small style="color:var(--text-2);">Source: {dep.get('source', '')}</small>
             </div>
-            """, unsafe_allow_html=True)
+            """).strip(), unsafe_allow_html=True)
 
     with col_grid2:
-        st.markdown('<div class="kb-section-title">Critical Risks and Landmines</div>', unsafe_allow_html=True)
-        for j, risk in enumerate(profile.get("risks", [])):
+        st.markdown('<div class="kb-section-title">Critical risks</div>', unsafe_allow_html=True)
+        risk_rows = []
+        for risk in profile.get("risks", []):
             conf = risk.get("confidence", "MEDIUM")
-            card_class = "kb-card-danger" if conf == "HIGH" else "kb-card-warning"
-            with st.expander(f"Risk #{j+1}: {risk.get('text', '')[:75]}...", expanded=(j < 2)):
-                st.markdown(f"""
-                <div class="kb-card {card_class}">
-                    <p style="font-size:0.95rem; font-weight:600; color:var(--text-primary); margin-bottom:0.5rem;">{risk.get('text', '')}</p>
-                    <p>{confidence_badge(conf)} &nbsp;<span style="color:var(--text-muted); font-size:0.8rem;">Source: {risk.get('source', '')}</span></p>
-                </div>
-                """, unsafe_allow_html=True)
-                excerpt = risk.get("excerpt", "")
-                if excerpt:
-                    st.markdown(render_citation(risk.get("source", ""), excerpt), unsafe_allow_html=True)
+            excerpt = risk.get("excerpt", "")
+            cite_html = render_citation(risk.get("source", ""), excerpt) if excerpt else ""
+            risk_rows.append(textwrap.dedent(f"""
+            <tr>
+                <td>
+                    <div style="font-weight:600; margin-bottom:4px; color:var(--text);">{risk.get('text', '')}</div>
+                    {cite_html}
+                </td>
+                <td style="white-space:nowrap;">{confidence_badge(conf)}</td>
+                <td style="font-size:13px; color:var(--text-2); font-family:monospace;">{risk.get('source', '')}</td>
+            </tr>
+            """).strip())
+        risk_table_html = textwrap.dedent(f"""
+        <table class="kb-plain-table">
+            <thead>
+                <tr>
+                    <th style="width:55%;">Risk</th>
+                    <th style="width:25%;">Confidence</th>
+                    <th style="width:20%;">Source</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(risk_rows) if risk_rows else '<tr><td colspan="3" style="color:var(--text-2);">No risks recorded.</td></tr>'}
+            </tbody>
+        </table>
+        """).strip()
+        st.markdown(risk_table_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="kb-section-title">Unresolved Knowledge Gaps</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Unresolved knowledge gaps</div>', unsafe_allow_html=True)
         for q in profile.get("unresolved", []):
-            st.markdown(f"""
-            <div class="kb-card kb-card-warning">
-                <p style="font-weight:600; color:var(--status-warning-text); margin-bottom:4px;">{q.get('question', '')}</p>
-                <p style="color:var(--text-secondary); font-size:0.82rem; margin-bottom:0;">
+            st.markdown(textwrap.dedent(f"""
+            <div class="kb-card" style="background:var(--warning-bg); border:1px solid var(--border);">
+                <p style="font-weight:600; color:var(--warning); margin-bottom:4px;">{q.get('question', '')}</p>
+                <p style="color:var(--text-2); font-size:13px; margin-bottom:0;">
                     <i>Detection note: {q.get('why_unknown', '')}</i>
                 </p>
             </div>
-            """, unsafe_allow_html=True)
+            """).strip(), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="kb-section-title">Stakeholders and Key Contacts</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Stakeholders and key contacts</div>', unsafe_allow_html=True)
         for contact in profile.get("contacts", []):
-            st.markdown(f"""
-            <div class="kb-card kb-card-success">
-                <div style="font-weight:600; color:var(--text-primary);">{contact.get('name', '')}</div>
-                <div style="font-size:0.85rem; color:var(--text-secondary);">{contact.get('role', '')}</div>
-                <small style="color:var(--text-muted);">Source: {contact.get('source', '')}</small>
+            st.markdown(textwrap.dedent(f"""
+            <div class="kb-card" style="background:var(--surface-2); border:1px solid var(--border);">
+                <div style="font-weight:600; color:var(--text);">{contact.get('name', '')}</div>
+                <div style="font-size:13px; color:var(--text-2);">{contact.get('role', '')}</div>
+                <small style="color:var(--text-2);">Source: {contact.get('source', '')}</small>
             </div>
-            """, unsafe_allow_html=True)
+            """).strip(), unsafe_allow_html=True)
 
     st.markdown("---")
     col_act1, col_act2 = st.columns([2, 1])
@@ -2028,25 +1564,20 @@ elif st.session_state.page == "employee":
         st.error("No knowledge profile found. Please start by connecting sources.")
         st.stop()
 
-    if st.session_state.is_demo:
-        st.markdown("""
-        <div class="kb-banner">
-            <b>Demo mode active:</b> Interacting as <b>Sarah Chen</b>. Pre-populated decision assessments, resolved questions, and critical tribal guidance are loaded.
-        </div>
-        """, unsafe_allow_html=True)
+
 
     employee = st.session_state.employee_name or "Departing Engineer"
     project = st.session_state.project_role or "Key System Contributor"
 
-    st.markdown(f"""
+    st.markdown(textwrap.dedent(f"""
     <div class="kb-panel-hero">
-        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text-primary); margin:0 0 4px 0;">Employee Knowledge Hub</h2>
-        <div style="color:var(--text-secondary); font-size:0.875rem; margin-bottom:0.6rem;">
+        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 4px 0;">Employee knowledge hub</h2>
+        <div style="color:var(--text-2); font-size:0.875rem; margin-bottom:0.6rem;">
             <b>Welcome, {employee}.</b> Verify extracted findings, resolve identified documentation gaps, and record unwritten operational context before departure.
         </div>
-        <span class="badge badge-neutral">{project}</span>
+        <span class="kb-status-dot-item" style="color:var(--text-2);"><span class="kb-dot" style="background-color:var(--accent);"></span>{project}</span>
     </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
 
     decisions = profile.get("decisions", [])
     risks = profile.get("risks", [])
@@ -2069,22 +1600,36 @@ elif st.session_state.page == "employee":
     t_pct = min(1.0, len(tribal_items) / 3.0)
     readiness_score = int((v_pct * 0.4 + g_pct * 0.4 + t_pct * 0.2) * 100)
 
-    st.markdown("""
+    st.markdown(textwrap.dedent("""
     <div class="kb-banner-tip">
-        <b>💡 Pro-Tip for Departing Engineers:</b> The most invaluable handover knowledge is usually what is unwritten — why a certain design pattern was rejected, vendor rate limits, and who to message during a late-night outage.
+        <b>Tip for departing engineers:</b> The most invaluable handover knowledge is usually what is unwritten — why a certain design pattern was rejected, vendor rate limits, and who to message during a late-night outage.
     </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
 
-    # Stat Cards
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown(render_stat_card("Verified Items", f"{verified_count}/{total_verifiable}", "var(--status-success-text)"), unsafe_allow_html=True)
-    with c2:
-        st.markdown(render_stat_card("Gaps Resolved", f"{gaps_resolved}/{total_gaps}", "var(--accent)"), unsafe_allow_html=True)
-    with c3:
-        st.markdown(render_stat_card("Tribal Wisdom", str(len(tribal_items)), "var(--status-warning-text)"), unsafe_allow_html=True)
-    with c4:
-        st.markdown(render_stat_card("Handover Readiness", f"{readiness_score}%", "#10B981"), unsafe_allow_html=True)
+    # Compact Summary Row
+    st.markdown(textwrap.dedent(f"""
+    <div class="kb-summary-row">
+        <div class="kb-summary-item">
+            <div class="kb-summary-value">{verified_count}/{total_verifiable}</div>
+            <div class="kb-summary-label">Verified items</div>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <div class="kb-summary-value">{gaps_resolved}/{total_gaps}</div>
+            <div class="kb-summary-label">Gaps resolved</div>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <div class="kb-summary-value">{len(tribal_items)}</div>
+            <div class="kb-summary-label">Tribal wisdom</div>
+        </div>
+        <div class="kb-summary-divider"></div>
+        <div class="kb-summary-item">
+            <div class="kb-summary-value">{readiness_score}%</div>
+            <div class="kb-summary-label">Handover readiness</div>
+        </div>
+    </div>
+    """).strip(), unsafe_allow_html=True)
 
     st.progress(readiness_score / 100.0)
     st.markdown("---")
@@ -2096,7 +1641,7 @@ elif st.session_state.page == "employee":
     ])
 
     with emp_tab1:
-        st.markdown('<div class="kb-section-title">Architectural Decisions Verification</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Architectural decisions verification</div>', unsafe_allow_html=True)
         st.caption("Confirm accuracy or add context explaining the trade-offs that led to each decision.")
 
         for i, decision in enumerate(decisions):
@@ -2108,12 +1653,12 @@ elif st.session_state.page == "employee":
             current_note = saved_verif.get("note", "")
 
             with st.expander(f"Decision #{i+1}: {decision.get('text', '')[:75]}...", expanded=(i == 0)):
-                st.markdown(f"""
+                st.markdown(textwrap.dedent(f"""
                 <div class="kb-card kb-card-info">
-                    <p style="font-size:0.95rem; font-weight:600; color:var(--text-primary); margin-bottom:0.4rem;">{decision.get('text', '')}</p>
-                    <p>{source_badge(stype)} {confidence_badge(conf)} &nbsp;<span style="color:var(--text-muted); font-size:0.8rem;">Source: {decision.get('source', '')}</span></p>
+                    <p style="font-size:0.95rem; font-weight:600; color:var(--text); margin-bottom:0.4rem;">{decision.get('text', '')}</p>
+                    <p>{source_badge(stype)} {confidence_badge(conf)} &nbsp;<span style="color:var(--text-2); font-size:0.8rem;">Source: {decision.get('source', '')}</span></p>
                 </div>
-                """, unsafe_allow_html=True)
+                """).strip(), unsafe_allow_html=True)
                 excerpt = decision.get("excerpt", "")
                 if excerpt:
                     st.markdown(render_citation(decision.get("source", ""), excerpt), unsafe_allow_html=True)
@@ -2142,7 +1687,7 @@ elif st.session_state.page == "employee":
                 }
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="kb-section-title">Critical Risks Verification</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Critical risks verification</div>', unsafe_allow_html=True)
         st.caption("Confirm known risks and specify concrete mitigation steps.")
 
         for j, risk in enumerate(risks):
@@ -2154,12 +1699,12 @@ elif st.session_state.page == "employee":
 
             with st.expander(f"Risk #{j+1}: {risk.get('text', '')[:75]}...", expanded=(j == 0)):
                 card_class = "kb-card-danger" if conf == "HIGH" else "kb-card-warning"
-                st.markdown(f"""
+                st.markdown(textwrap.dedent(f"""
                 <div class="kb-card {card_class}">
-                    <p style="font-size:0.95rem; font-weight:600; color:var(--text-primary); margin-bottom:0.4rem;">{risk.get('text', '')}</p>
-                    <p>{confidence_badge(conf)} &nbsp;<span style="color:var(--text-muted); font-size:0.8rem;">Source: {risk.get('source', '')}</span></p>
+                    <p style="font-size:0.95rem; font-weight:600; color:var(--text); margin-bottom:0.4rem;">{risk.get('text', '')}</p>
+                    <p>{confidence_badge(conf)} &nbsp;<span style="color:var(--text-2); font-size:0.8rem;">Source: {risk.get('source', '')}</span></p>
                 </div>
-                """, unsafe_allow_html=True)
+                """).strip(), unsafe_allow_html=True)
                 excerpt = risk.get("excerpt", "")
                 if excerpt:
                     st.markdown(render_citation(risk.get("source", ""), excerpt), unsafe_allow_html=True)
@@ -2188,7 +1733,7 @@ elif st.session_state.page == "employee":
                 }
 
     with emp_tab2:
-        st.markdown('<div class="kb-section-title">Resolve Knowledge Gaps</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Resolve knowledge gaps</div>', unsafe_allow_html=True)
         st.info("Tacit knowledge opportunity: Unanswered questions discovered across codebase and documents. Add the unwritten context before leaving.")
 
         if unresolved:
@@ -2197,12 +1742,12 @@ elif st.session_state.page == "employee":
                 why = q.get("why_unknown", "")
                 existing_ans = st.session_state.employee_gap_answers.get(q_text, "")
 
-                st.markdown(f"""
+                st.markdown(textwrap.dedent(f"""
                 <div class="kb-card kb-card-warning">
-                    <p style="font-size:0.95rem; font-weight:600; color:var(--status-warning-text); margin-bottom:4px;">Question #{k+1}: {q_text}</p>
-                    <p style="color:var(--text-secondary); font-size:0.82rem; margin-bottom:0;"><i>Detection rationale: {why}</i></p>
+                    <p style="font-size:0.95rem; font-weight:600; color:var(--warning); margin-bottom:4px;">Question #{k+1}: {q_text}</p>
+                    <p style="color:var(--text-2); font-size:0.82rem; margin-bottom:0;"><i>Detection rationale: {why}</i></p>
                 </div>
-                """, unsafe_allow_html=True)
+                """).strip(), unsafe_allow_html=True)
 
                 ans_input = st.text_area(
                     f"Your resolution for Question #{k+1}:",
@@ -2222,7 +1767,7 @@ elif st.session_state.page == "employee":
             st.success("No unresolved knowledge gaps identified in this repository.")
 
     with emp_tab3:
-        st.markdown('<div class="kb-section-title">Share Tribal Knowledge and Operational Notes</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kb-section-title">Share tribal knowledge and operational notes</div>', unsafe_allow_html=True)
         st.markdown("Record informal wisdom that is not documented anywhere: deployment constraints, vendor quirks, debugging shortcuts, and unwritten team practices.")
 
         with st.form("add_tribal_knowledge_form", clear_on_submit=True):
@@ -2249,25 +1794,26 @@ elif st.session_state.page == "employee":
                         "title": t_title.strip(),
                         "content": t_content.strip()
                     })
+                    save_project_state(st.session_state)
                     st.toast(f"Added: {t_title.strip()}")
                     st.rerun()
                 else:
                     st.error("Please provide both a title and description.")
 
         if st.session_state.employee_tribal_knowledge:
-            st.markdown("#### Recorded Tribal Knowledge Items:")
+            st.markdown("#### Recorded tribal knowledge items:")
             for idx, item in enumerate(st.session_state.employee_tribal_knowledge):
                 cat = item.get("category", "Tip")
                 card_class = "kb-card-danger" if cat == "Warning" else ("kb-card-success" if cat == "Contact" else "kb-card")
 
                 c_item, c_del = st.columns([6, 1])
                 with c_item:
-                    st.markdown(f"""
+                    st.markdown(textwrap.dedent(f"""
                     <div class="kb-card {card_class}">
-                        <div style="font-weight:600; color:var(--text-primary);">[{cat}] {item.get('title', '')}</div>
-                        <p style="font-size:0.875rem; color:var(--text-secondary); margin-top:4px; margin-bottom:0;">{item.get('content', '')}</p>
+                        <div style="font-weight:600; color:var(--text);">[{cat}] {item.get('title', '')}</div>
+                        <p style="font-size:0.875rem; color:var(--text-2); margin-top:4px; margin-bottom:0;">{item.get('content', '')}</p>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """).strip(), unsafe_allow_html=True)
                 with c_del:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("Remove", key=f"del_tk_{idx}"):
@@ -2297,28 +1843,44 @@ elif st.session_state.page == "review":
         st.error("No knowledge profile found. Please start by connecting sources.")
         st.stop()
 
-    if st.session_state.is_demo:
-        st.markdown("""
-        <div class="kb-banner">
-            <b>Demo mode active:</b> Review and sign off on each section to unlock the multi-perspective handover package.
-        </div>
-        """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="kb-panel-hero">
-        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text-primary); margin:0 0 4px 0;">Manager Review and Executive Sign-Off</h2>
-        <div style="color:var(--text-secondary); font-size:0.875rem;">
-            Inspect verified findings, employee gap resolutions, and tribal knowledge. Add managerial follow-ups, then approve each section.
+
+    # Manager status line
+    _mgr_profile = st.session_state.knowledge_profile
+    if not _mgr_profile:
+        _mgr_status = "Waiting for employee to upload sources"
+        _mgr_dot_cls = "kb-dot-muted"
+    else:
+        _mgr_approved_count = sum(1 for v in st.session_state.approvals.values() if v is True)
+        if _mgr_approved_count < 5:
+            _mgr_status = f"Ready for manager review ({_mgr_approved_count}/5 approved)"
+            _mgr_dot_cls = "kb-dot-warning"
+        else:
+            _mgr_status = "Ready for manager review (All approved)"
+            _mgr_dot_cls = "kb-dot-success"
+
+    st.markdown(textwrap.dedent(f"""
+        <div style="background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:8px 14px;margin-bottom:14px;display:flex;align-items:center;gap:8px;">
+          <span class="kb-dot {_mgr_dot_cls}" style="width:8px;height:8px;border-radius:50%;display:inline-block;"></span>
+          <span style="font-size:13px;color:var(--text);font-weight:500;">Status: <b>{_mgr_status}</b></span>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
+
+    st.markdown(textwrap.dedent("""
+        <div class="kb-panel-hero">
+          <h2 style="font-size:16px;font-weight:600;color:var(--text);margin:0 0 4px 0;">Manager review</h2>
+          <div style="color:var(--text-2);font-size:13px;">
+            Inspect verified findings, employee gap resolutions, and tribal knowledge. Add notes, then approve each section.
+          </div>
+        </div>
+    """).strip(), unsafe_allow_html=True)
 
     sections = [
-        ("decisions", "Decision Log", profile.get("decisions", [])),
-        ("risks", "Risks and Dependencies", profile.get("risks", [])),
-        ("unresolved", "Resolved and Open Questions", profile.get("unresolved", [])),
-        ("tribal", "Tribal Knowledge and Constraints", st.session_state.employee_tribal_knowledge),
-        ("contacts", "Key Contacts and Ownership", profile.get("contacts", [])),
+        ("decisions", "Decision log", profile.get("decisions", [])),
+        ("risks", "Risks and dependencies", profile.get("risks", [])),
+        ("unresolved", "Resolved and open questions", profile.get("unresolved", [])),
+        ("tribal", "Tribal knowledge and constraints", st.session_state.employee_tribal_knowledge),
+        ("contacts", "Key contacts and ownership", profile.get("contacts", [])),
     ]
 
     all_approved = True
@@ -2384,24 +1946,16 @@ elif st.session_state.page == "review":
             with btn_app_col:
                 if st.button("Approve section", key=f"btn_app_{section_id}", use_container_width=True):
                     st.session_state.approvals[section_id] = True
-                    st.session_state.action_history.append({
-                        "who": "Manager",
-                        "action": f"Approved {section_title}",
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "reason": st.session_state.corrections.get(section_id, "Approved") or "Approved"
-                    })
+                    log_audit_entry(st.session_state, st.session_state.get("auth_username","manager"), f"Approved section: {section_title}")
+                    save_project_state(st.session_state)
                     st.rerun()
 
             with btn_rej_col:
                 if st.button("Reject section", key=f"btn_rej_{section_id}", use_container_width=True):
                     rej_text = st.session_state.get(f"rej_reason_{section_id}", "").strip() or "Rejected by manager"
                     st.session_state.approvals[section_id] = "rejected"
-                    st.session_state.action_history.append({
-                        "who": "Manager",
-                        "action": f"Rejected {section_title}",
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "reason": rej_text
-                    })
+                    log_audit_entry(st.session_state, st.session_state.get("auth_username","manager"), f"Rejected section: {section_title}", reason=rej_text)
+                    save_project_state(st.session_state)
                     st.rerun()
 
             st.text_input(
@@ -2424,23 +1978,42 @@ elif st.session_state.page == "review":
 
     with st.expander("Audit history log", expanded=False):
         if st.session_state.action_history:
-            audit_html = '<div style="border:1px solid var(--border-color); border-radius:var(--radius); overflow:hidden;">'
+            rows = []
             for entry in reversed(st.session_state.action_history):
-                audit_html += render_audit_entry(entry)
-            audit_html += "</div>"
-            st.markdown(audit_html, unsafe_allow_html=True)
+                ts = entry.get('timestamp', '')
+                who = entry.get('who', '')
+                action = entry.get('action', '')
+                reason = entry.get('reason', '')
+                color = "var(--success)" if "Approved" in action else "var(--error)"
+                rows.append(f"<tr><td>{ts}</td><td>{who}</td><td style='color:{color}; font-weight:600;'>{action}</td><td>{reason}</td></tr>")
+            audit_table = textwrap.dedent(f"""
+            <table class="kb-plain-table">
+                <thead>
+                    <tr>
+                        <th style="width:160px;">Timestamp</th>
+                        <th style="width:100px;">User</th>
+                        <th style="width:180px;">Action</th>
+                        <th>Notes / Reason</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(rows)}
+                </tbody>
+            </table>
+            """).strip()
+            st.markdown(audit_table, unsafe_allow_html=True)
         else:
             st.caption("No review actions recorded yet.")
 
     approved_count = sum(1 for v in st.session_state.approvals.values() if v is True)
     total_sections = len(sections)
 
-    st.markdown(f"""
+    st.markdown(textwrap.dedent(f"""
     <div class="kb-approval-progress">
         <span class="kb-approval-progress-label">Approval progress</span>
         <span class="kb-approval-progress-count">{approved_count} / {total_sections}</span>
     </div>
-    """, unsafe_allow_html=True)
+    """).strip(), unsafe_allow_html=True)
     progress = approved_count / total_sections if total_sections > 0 else 0
     st.progress(progress)
 
@@ -2465,93 +2038,90 @@ elif st.session_state.page == "review":
                 st.warning("Session limit reached. Please refresh the page to start a new session.")
             else:
                 st.session_state.handovers_run += 1
-                if st.session_state.is_demo:
-                    st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
-                    st.session_state.page = "handover"
-                    st.rerun()
-                else:
-                    reviewed_profile = copy.deepcopy(profile)
+                reviewed_profile = copy.deepcopy(profile)
 
-                    filtered_decisions = []
-                    for idx, decision in enumerate(profile.get("decisions", [])):
-                        verif = st.session_state.employee_verifications.get(
-                            f"decision_{idx}", {}
+                filtered_decisions = []
+                for idx, decision in enumerate(profile.get("decisions", [])):
+                    verif = st.session_state.employee_verifications.get(
+                        f"decision_{idx}", {}
+                    )
+                    status = verif.get("status", "")
+                    if status == "Inaccurate or outdated":
+                        continue
+                    item = copy.deepcopy(decision)
+                    if status == "Needs context" and verif.get("note"):
+                        item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
+                    filtered_decisions.append(item)
+                reviewed_profile["decisions"] = filtered_decisions
+
+                filtered_risks = []
+                for idx, risk in enumerate(profile.get("risks", [])):
+                    verif = st.session_state.employee_verifications.get(
+                        f"risk_{idx}", {}
+                    )
+                    status = verif.get("status", "")
+                    if status == "False alarm or resolved":
+                        continue
+                    item = copy.deepcopy(risk)
+                    if status == "Mitigated or low priority":
+                        suffix = " [Employee: mitigated / low priority]"
+                        if verif.get("note"):
+                            suffix += f" [Employee note: {verif['note']}]"
+                        item["text"] = item["text"] + suffix
+                    elif status == "Active risk" and verif.get("note"):
+                        item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
+                    filtered_risks.append(item)
+                reviewed_profile["risks"] = filtered_risks
+
+                reviewed_profile["manager_notes"] = dict(st.session_state.corrections)
+
+                with st.spinner("Generating manager handover with Gemini..."):
+                    try:
+                        from utils.gemini_engine import generate_manager_handover
+                        mgr = generate_manager_handover(
+                            reviewed_profile,
+                            st.session_state.employee_name,
+                            st.session_state.project_role,
+                            st.session_state.api_key
                         )
-                        status = verif.get("status", "")
-                        if status == "Inaccurate or outdated":
-                            continue
-                        item = copy.deepcopy(decision)
-                        if status == "Needs context" and verif.get("note"):
-                            item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
-                        filtered_decisions.append(item)
-                    reviewed_profile["decisions"] = filtered_decisions
+                        st.session_state.manager_handover = mgr
+                    except Exception as e:
+                        st.error(f"Manager handover generation failed: {_safe_err(e)}")
+                        st.stop()
 
-                    filtered_risks = []
-                    for idx, risk in enumerate(profile.get("risks", [])):
-                        verif = st.session_state.employee_verifications.get(
-                            f"risk_{idx}", {}
+                with st.spinner("Generating technical successor handover with Gemini..."):
+                    try:
+                        from utils.gemini_engine import generate_newhire_handover
+                        nh = generate_newhire_handover(
+                            reviewed_profile,
+                            st.session_state.employee_name,
+                            st.session_state.project_role,
+                            st.session_state.api_key
                         )
-                        status = verif.get("status", "")
-                        if status == "False alarm or resolved":
-                            continue
-                        item = copy.deepcopy(risk)
-                        if status == "Mitigated or low priority":
-                            suffix = " [Employee: mitigated / low priority]"
-                            if verif.get("note"):
-                                suffix += f" [Employee note: {verif['note']}]"
-                            item["text"] = item["text"] + suffix
-                        elif status == "Active risk" and verif.get("note"):
-                            item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
-                        filtered_risks.append(item)
-                    reviewed_profile["risks"] = filtered_risks
+                        st.session_state.newhire_handover = nh
+                    except Exception as e:
+                        st.error(f"Technical successor handover generation failed: {_safe_err(e)}")
+                        st.stop()
 
-                    reviewed_profile["manager_notes"] = dict(st.session_state.corrections)
+                with st.spinner("Generating employee notes with Gemini..."):
+                    try:
+                        from utils.gemini_engine import generate_employee_handover
+                        emp_doc = generate_employee_handover(
+                            profile,
+                            st.session_state.employee_name,
+                            st.session_state.project_role,
+                            st.session_state.employee_verifications,
+                            st.session_state.employee_gap_answers,
+                            st.session_state.employee_tribal_knowledge,
+                            st.session_state.api_key
+                        )
+                        st.session_state.employee_handover = emp_doc
+                    except Exception as e:
+                        st.warning(f"Employee handover note: {_safe_err(e)}")
+                        st.session_state.employee_handover = ""
 
-                    with st.spinner("Generating manager handover with Gemini..."):
-                        try:
-                            from utils.gemini_engine import generate_manager_handover
-                            mgr = generate_manager_handover(
-                                reviewed_profile,
-                                st.session_state.employee_name,
-                                st.session_state.project_role,
-                                st.session_state.api_key
-                            )
-                            st.session_state.manager_handover = mgr
-                        except Exception as e:
-                            st.error(f"Manager handover generation failed: {_safe_err(e)}")
-                            st.stop()
-
-                    with st.spinner("Generating technical successor handover with Gemini..."):
-                        try:
-                            from utils.gemini_engine import generate_newhire_handover
-                            nh = generate_newhire_handover(
-                                reviewed_profile,
-                                st.session_state.employee_name,
-                                st.session_state.project_role,
-                                st.session_state.api_key
-                            )
-                            st.session_state.newhire_handover = nh
-                        except Exception as e:
-                            st.error(f"Technical successor handover generation failed: {_safe_err(e)}")
-                            st.stop()
-
-                    with st.spinner("Generating employee notes with Gemini..."):
-                        try:
-                            from utils.gemini_engine import generate_employee_handover
-                            emp_doc = generate_employee_handover(
-                                profile,
-                                st.session_state.employee_name,
-                                st.session_state.project_role,
-                                st.session_state.employee_verifications,
-                                st.session_state.employee_gap_answers,
-                                st.session_state.employee_tribal_knowledge,
-                                st.session_state.api_key
-                            )
-                            st.session_state.employee_handover = emp_doc
-                        except Exception as e:
-                            st.warning(f"Employee handover note: {_safe_err(e)}")
-                            st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
-
+                    log_audit_entry(st.session_state, st.session_state.get("auth_username","manager"), "Handover package generated")
+                    save_project_state(st.session_state)
                     st.session_state.page = "handover"
                     st.rerun()
 
@@ -2561,7 +2131,7 @@ elif st.session_state.page == "review":
             st.rerun()
 
     if btn_disabled:
-        st.caption("Sign off on all sections above to unlock handover generation.")
+        st.caption("Sign off on all sections above to generate the handover package.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2577,12 +2147,7 @@ elif st.session_state.page == "handover":
             st.rerun()
         st.stop()
 
-    if st.session_state.is_demo:
-        st.markdown("""
-        <div class="kb-banner">
-            <b>Demo mode:</b> Displaying finalized handover documents for <b>Sarah Chen</b> (PayFlow). Ready for Markdown export.
-        </div>
-        """, unsafe_allow_html=True)
+
 
     employee = st.session_state.employee_name or "Departing Engineer"
     project = st.session_state.project_role or "Key System Contributor"
@@ -2594,37 +2159,33 @@ elif st.session_state.page == "handover":
             <div style="display:flex; align-items:center; gap:10px;">
                 <span class="kb-avatar-chip" style="width:28px; height:28px; font-size:0.78rem;">{initials}</span>
                 <div>
-                    <h2 style="font-size:1.25rem; font-weight:700; color:var(--text-primary); margin:0 0 2px 0;">Handover Package Finalized</h2>
-                    <div style="font-size:0.875rem; color:var(--text-secondary);">
+                    <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 2px 0;">Handover package finalized</h2>
+                    <div style="font-size:0.875rem; color:var(--text-2);">
                         All sections reviewed, enriched with employee context, and approved by management.
                     </div>
                 </div>
             </div>
-            <span class="badge badge-success">{icon_svg("check", 12)} Audited and approved</span>
+            <span class="kb-status-dot-item" style="color:var(--success); font-weight:600;"><span class="kb-dot" style="background-color:var(--success);"></span>Audited and approved</span>
         </div>
-        <div style="margin-top:0.85rem; font-size:0.85rem; color:var(--text-muted);">
+        <div style="margin-top:0.85rem; font-size:0.85rem; color:var(--text-2);">
             <b>Knowledge holder:</b> {employee} &nbsp;|&nbsp; <b>Scope:</b> {project}
         </div>
     </div>
     """)
     st.markdown(header_html, unsafe_allow_html=True)
 
-    role_col1, role_col2 = st.columns([3, 1])
-    with role_col1:
-        current_role_idx = ["Manager", "Technical Successor", "Employee"].index(st.session_state.get("view_role", "Manager")) if st.session_state.get("view_role") in ["Manager", "Technical Successor", "Employee"] else 0
-        selected_role = st.selectbox(
-            "View handover perspective as:",
-            ["Manager", "Technical Successor", "Employee"],
-            index=current_role_idx,
-            key="handover_view_role"
-        )
-        st.session_state.view_role = selected_role
-    with role_col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(
-            f'<div style="text-align:right;"><span class="badge badge-neutral" style="font-size:0.8rem; padding:6px 12px;">{icon_svg("shield", 12)} Role perspective: {selected_role}</span></div>',
-            unsafe_allow_html=True
-        )
+    _auth_role = st.session_state.get("auth_role", "Manager")
+    if _auth_role == "Manager":
+        selected_role = "Manager"
+    elif _auth_role == "Employee":
+        selected_role = "Employee"
+    else:
+        selected_role = "Technical Successor"
+
+    st.markdown(
+        f'<div style="font-size:13px; color:var(--text-2); margin-bottom:12px;"><span class="kb-dot" style="background-color:var(--accent);"></span> Viewing as: <b>{selected_role}</b> ({_auth_role} account)</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown("---")
 
@@ -2685,6 +2246,8 @@ elif st.session_state.page == "handover":
                         "name": confirmed_name,
                         "time": time.strftime("%Y-%m-%d %H:%M:%S")
                     }
+                    log_audit_entry(st.session_state, st.session_state.get("auth_username","successor"), f"Handover acknowledged by {confirmed_name}")
+                    save_project_state(st.session_state)
                     st.rerun()
 
         st.markdown("---")
@@ -2701,7 +2264,7 @@ elif st.session_state.page == "handover":
         st.markdown('<div class="kb-section-title" style="font-size:1.1rem; margin-bottom:0.4rem;">Employee notes and tribal knowledge</div>', unsafe_allow_html=True)
         st.caption("First-person context, verified architectural decisions, resolved blind spots, and unwritten operational tips.")
         st.markdown("---")
-        raw_employee = st.session_state.employee_handover or DEMO_EMPLOYEE_HANDOVER
+        raw_employee = st.session_state.employee_handover or ""
         redacted_employee = redact_sensitive_info(raw_employee)
         st.markdown(redacted_employee)
         st.markdown("---")
@@ -2718,22 +2281,11 @@ elif st.session_state.page == "handover":
     col_reset1, col_reset2 = st.columns(2)
     with col_reset1:
         if st.button("Start new handover", use_container_width=True):
-            for key in ["knowledge_profile", "is_demo", "approvals", "corrections",
-                        "manager_handover", "newhire_handover", "employee_handover",
-                        "employee_verifications", "employee_gap_answers", "employee_tribal_knowledge",
-                        "all_sources", "employee_name", "project_role", "github_url", "github_token",
-                        "pasted_text", "uploaded_files", "action_history", "acknowledgement"]:
-                if "approvals" in key or "corrections" in key or "verifications" in key or "gap_answers" in key:
-                    st.session_state[key] = {}
-                elif "sources" in key or "tribal_knowledge" in key or "history" in key:
-                    st.session_state[key] = []
-                elif key in ("uploaded_files", "acknowledgement"):
-                    st.session_state[key] = None
-                elif key == "is_demo":
-                    st.session_state[key] = False
-                else:
-                    st.session_state[key] = ""
-            st.session_state.view_role = "Manager"
+            from utils.store import get_empty_state
+            _empty = get_empty_state()
+            for k, v in _empty.items():
+                st.session_state[k] = v
+            save_project_state(st.session_state)
             st.session_state.page = "connect"
             st.rerun()
 
@@ -2741,3 +2293,201 @@ elif st.session_state.page == "handover":
         if st.button("Back to manager review", use_container_width=True):
             st.session_state.page = "review"
             st.rerun()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 6: EMPLOYEE NOTES (Employee role only)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "employee_notes":
+    if st.session_state.get("auth_role") != "Employee":
+        st.error("Access denied for your role.")
+        st.stop()
+    step_indicator("employee_notes")
+    render_role_status_line("Employee")
+
+    employee = st.session_state.auth_name or "Departing Engineer"
+    project = st.session_state.project_role or "Key System Contributor"
+
+    st.markdown(textwrap.dedent(f"""
+    <div class="kb-panel-hero">
+        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 4px 0;">My employee notes</h2>
+        <div style="color:var(--text-2); font-size:0.875rem;">
+            Your first-person handover document, generated from your verified findings and tribal knowledge.
+        </div>
+    </div>
+    """).strip(), unsafe_allow_html=True)
+
+    raw_emp = st.session_state.employee_handover
+    if not raw_emp:
+        st.info("Your employee notes document will appear here after the manager generates the handover package.")
+        st.stop()
+
+    redacted_emp = redact_sensitive_info(raw_emp)
+    st.markdown(redacted_emp)
+    st.markdown("---")
+    st.download_button(
+        label="Download my employee notes (Markdown)",
+        data=redacted_emp,
+        file_name=f"employee_notes_{employee.replace(' ', '_')}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 7: SUCCESSOR HANDOVER (Successor role only)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "successor_handover":
+    if st.session_state.get("auth_role") != "Successor":
+        st.error("Access denied for your role.")
+        st.stop()
+    step_indicator("successor_handover")
+    render_role_status_line("Successor")
+
+    approvals = st.session_state.get("approvals", {})
+    all_approved = sum(1 for v in approvals.values() if v is True) >= 5
+    has_handover = bool(st.session_state.get("manager_handover") and st.session_state.get("newhire_handover"))
+
+    if not has_handover or not all_approved:
+        st.markdown(textwrap.dedent("""
+        <div class="kb-panel-hero">
+            <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 4px 0;">Technical handover</h2>
+            <div style="color:var(--text-2); font-size:0.875rem;">
+                Your handover document will appear here once the manager has approved all sections and generated the package.
+            </div>
+        </div>
+        """).strip(), unsafe_allow_html=True)
+        st.warning("Handover not approved yet. Check back after the manager completes the review.")
+        st.stop()
+
+    employee = st.session_state.employee_name or "Departing Engineer"
+    project = st.session_state.project_role or "Key System Contributor"
+
+    st.markdown(textwrap.dedent(f"""
+    <div class="kb-panel-hero">
+        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 4px 0;">Technical handover — {project}</h2>
+        <div style="color:var(--text-2); font-size:0.875rem;">
+            Deep architectural rationale, known risks, critical paths, and operational guidance from {employee}.
+        </div>
+    </div>
+    """).strip(), unsafe_allow_html=True)
+
+    raw_successor = st.session_state.newhire_handover or ""
+    redacted_successor = redact_sensitive_info(raw_successor)
+    st.markdown(redacted_successor)
+    st.markdown("---")
+
+    st.markdown('<div class="kb-section-title">Acknowledge receipt</div>', unsafe_allow_html=True)
+    if st.session_state.acknowledgement:
+        ack_info = st.session_state.acknowledgement
+        st.markdown(
+            render_receipt_card(
+                name=ack_info["name"],
+                timestamp=ack_info["time"],
+                project=project,
+                employee=employee,
+            ),
+            unsafe_allow_html=True
+        )
+    else:
+        st.caption("Sign below to confirm you have read and understood this handover document.")
+        ack_c1, ack_c2 = st.columns([2, 1])
+        with ack_c1:
+            succ_name_input = st.text_input(
+                "Your full name:",
+                placeholder="Enter your name to acknowledge receipt...",
+                key="succ_name_ack_suc"
+            )
+        with ack_c2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Acknowledge receipt", key="btn_ack_receipt_suc", use_container_width=True):
+                confirmed_name = succ_name_input.strip() or st.session_state.get("auth_name", "Successor")
+                st.session_state.acknowledgement = {
+                    "name": confirmed_name,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                log_audit_entry(st.session_state, st.session_state.get("auth_username","successor"), f"Handover acknowledged by {confirmed_name}")
+                save_project_state(st.session_state)
+                st.rerun()
+
+    st.markdown("---")
+    st.download_button(
+        label="Download technical handover (Markdown)",
+        data=redacted_successor,
+        file_name=f"handover_successor_{employee.replace(' ', '_')}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 8: AUDIT LOG (Manager only)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "audit":
+    if st.session_state.get("auth_role") != "Manager":
+        st.error("Access denied for your role.")
+        st.stop()
+    step_indicator("audit")
+
+    st.markdown(textwrap.dedent("""
+    <div class="kb-panel-hero">
+        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 4px 0;">Audit log</h2>
+        <div style="color:var(--text-2); font-size:0.875rem;">
+            Complete record of logins, page views, approvals, rejections, handover generation, and acknowledgements.
+        </div>
+    </div>
+    """).strip(), unsafe_allow_html=True)
+
+    history = st.session_state.get("action_history", [])
+    if not history:
+        st.info("No audit events recorded yet.")
+    else:
+        rows_html = ""
+        for entry in reversed(history):
+            ts = entry.get("timestamp", "")
+            who = entry.get("who", "")
+            action = entry.get("action", "")
+            reason = entry.get("reason", "")
+            if "Approved" in action:
+                color = "var(--success)"
+            elif "Rejected" in action or "Failed" in action:
+                color = "var(--error)"
+            elif "Logged out" in action:
+                color = "var(--warning)"
+            else:
+                color = "var(--text)"
+            rows_html += f"<tr><td style='color:var(--text-2);font-family:monospace;font-size:12px;'>{ts}</td><td style='font-weight:600;'>{who}</td><td style='color:{color};font-weight:500;'>{action}</td><td style='color:var(--text-2);font-size:13px;'>{reason}</td></tr>"
+
+        st.markdown(textwrap.dedent(f"""
+        <table class="kb-plain-table">
+            <thead>
+                <tr>
+                    <th style="width:160px;">Timestamp</th>
+                    <th style="width:120px;">User</th>
+                    <th style="width:220px;">Action</th>
+                    <th>Details / Reason</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+        """).strip(), unsafe_allow_html=True)
+
+        # CSV download
+        csv_buf = io.StringIO()
+        writer = csv.DictWriter(csv_buf, fieldnames=["timestamp","who","action","reason"])
+        writer.writeheader()
+        for entry in reversed(history):
+            writer.writerow({
+                "timestamp": entry.get("timestamp",""),
+                "who": entry.get("who",""),
+                "action": entry.get("action",""),
+                "reason": entry.get("reason",""),
+            })
+        st.download_button(
+            label="Download audit log (CSV)",
+            data=csv_buf.getvalue(),
+            file_name="baton_audit_log.csv",
+            mime="text/csv",
+            use_container_width=False,
+        )

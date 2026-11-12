@@ -25,3 +25,9 @@ Desktop.ini
 #Safe
 **/.streamlit/secrets.toml
 **/secrets.toml
+
+# Baton Project State Data
+data/
+**/data/
+project_state.json
+
