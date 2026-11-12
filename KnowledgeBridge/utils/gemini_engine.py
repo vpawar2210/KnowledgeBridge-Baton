@@ -6,13 +6,14 @@ with automatic REST fallback to ensure seamless compatibility with AQ. keys.
 
 import json
 import re
+import time
 import requests
 from google import genai
 from google.genai import types
 
 # Modern Google Gemini Models
-PRIMARY_MODEL = "gemini-2.5-flash"
-FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-flash-latest"]
+PRIMARY_MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"]
 
 ANALYZE_PROMPT = """
 You are Baton AI, an institutional knowledge extraction engine. You analyze documents and conversations left behind by a departing employee and reconstruct a structured knowledge profile for seamless team handover.
@@ -191,6 +192,8 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
     Call Gemini using official google-genai SDK (v1beta), with fallback across
     working models and direct REST endpoint to guarantee compatibility with AQ. keys.
     Enforces a strict 90-second timeout on every call.
+    Retries up to 2 times on 503/UNAVAILABLE with a 3-second wait.
+    Skips immediately on 404/NOT_FOUND.
     """
     key = api_key.strip()
     failed_models = {}
@@ -205,59 +208,106 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
 
     if client:
         for model_name in FALLBACK_MODELS:
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_output_tokens,
+                            http_options=types.HttpOptions(timeout=90000),
+                        ),
+                    )
+                    if response and response.text:
+                        return response.text
+                except Exception as e:
+                    err_str = str(e)
+                    if "timeout" in err_str.lower() or "timed out" in err_str.lower() or "deadline" in err_str.lower():
+                        had_timeout = True
+                    failed_models[f"SDK:{model_name}"] = err_str
+
+                    # If 404 or NOT_FOUND, skip immediately without retrying
+                    if "404" in err_str or "NOT_FOUND" in err_str:
+                        break
+
+                    # If 503 or UNAVAILABLE, wait 3 seconds and retry up to 2 times
+                    if "503" in err_str or "UNAVAILABLE" in err_str:
+                        if attempt < max_retries:
+                            time.sleep(3)
+                            continue
+                        else:
+                            break
+
+                    break
+
+    # 2. Try Direct Google Generative Language REST Endpoint (v1beta)
+    for model_name in FALLBACK_MODELS:
+        max_retries = 2
+        for attempt in range(max_retries + 1):
             try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                        http_options=types.HttpOptions(timeout=90000),
-                    ),
-                )
-                if response and response.text:
-                    return response.text
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": key,
+                }
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": temperature,
+                        "maxOutputTokens": max_output_tokens,
+                    }
+                }
+                res = requests.post(url, headers=headers, json=payload, timeout=90)
+                if res.status_code == 200:
+                    data = res.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", "")
+
+                resp_snippet = res.text[:120]
+                failed_models[f"REST:{model_name}"] = f"HTTP {res.status_code}: {resp_snippet}"
+
+                # If 404 or NOT_FOUND, skip immediately
+                if res.status_code == 404 or "NOT_FOUND" in resp_snippet:
+                    break
+
+                # If 503 or UNAVAILABLE, wait 3 seconds and retry up to 2 times
+                if res.status_code == 503 or "UNAVAILABLE" in resp_snippet:
+                    if attempt < max_retries:
+                        time.sleep(3)
+                        continue
+                    else:
+                        break
+
+                break
+
+            except requests.exceptions.Timeout:
+                had_timeout = True
+                failed_models[f"REST:{model_name}"] = "Request timed out after 90s"
+                break
             except Exception as e:
                 err_str = str(e)
                 if "timeout" in err_str.lower() or "timed out" in err_str.lower() or "deadline" in err_str.lower():
                     had_timeout = True
-                failed_models[f"SDK:{model_name}"] = err_str
-                continue
+                failed_models[f"REST:{model_name}"] = err_str
 
-    # 2. Try Direct Google Generative Language REST Endpoint (v1beta)
-    for model_name in FALLBACK_MODELS:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": key,
-            }
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": temperature,
-                    "maxOutputTokens": max_output_tokens,
-                }
-            }
-            res = requests.post(url, headers=headers, json=payload, timeout=90)
-            if res.status_code == 200:
-                data = res.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        return parts[0].get("text", "")
-            else:
-                failed_models[f"REST:{model_name}"] = f"HTTP {res.status_code}: {res.text[:120]}"
-        except requests.exceptions.Timeout:
-            had_timeout = True
-            failed_models[f"REST:{model_name}"] = "Request timed out after 90s"
-        except Exception as e:
-            err_str = str(e)
-            if "timeout" in err_str.lower() or "timed out" in err_str.lower() or "deadline" in err_str.lower():
-                had_timeout = True
-            failed_models[f"REST:{model_name}"] = err_str
-            continue
+                # If 404 or NOT_FOUND, skip immediately
+                if "404" in err_str or "NOT_FOUND" in err_str:
+                    break
+
+                # If 503 or UNAVAILABLE, wait 3 seconds and retry up to 2 times
+                if "503" in err_str or "UNAVAILABLE" in err_str:
+                    if attempt < max_retries:
+                        time.sleep(3)
+                        continue
+                    else:
+                        break
+
+                break
 
     if had_timeout:
         raise TimeoutError("Gemini took too long. Try a smaller file.")
@@ -265,7 +315,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
     summary_failed = "; ".join([f"{m}: {err}" for m, err in failed_models.items()])
     raise RuntimeError(
         f"Gemini API request failed. Models tried and failed: [{summary_failed}]. "
-        "Please verify your API key has the Generative Language API enabled."
+        "All Gemini models are busy or unavailable. Please try again in a minute."
     )
 
 
