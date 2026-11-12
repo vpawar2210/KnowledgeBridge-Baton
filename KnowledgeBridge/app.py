@@ -1252,35 +1252,49 @@ if st.session_state.page == "connect":
             (st.session_state.pasted_text.strip())
         )
 
-        btn_label = "🔍 Analyze & Reconstruct Knowledge"
-        if not st.session_state.api_key:
-            btn_label = "🎭 Load Demo — See Full Example"
+        # ── Helper: reset downstream state before any new run ─────────────
+        def _reset_downstream():
+            st.session_state.employee_verifications = {}
+            st.session_state.employee_gap_answers = {}
+            st.session_state.approvals = {}
+            st.session_state.corrections = {}
+            st.session_state.employee_tribal_knowledge = []
+            st.session_state.manager_handover = None
+            st.session_state.newhire_handover = None
+            st.session_state.employee_handover = None
 
-        analyze_btn = st.button(
-            btn_label,
-            type="primary",
+        # ── Button 1: Load Demo (always visible) ─────────────────────────
+        demo_btn = st.button(
+            "🎭 Load Demo Example",
             use_container_width=True,
-            disabled=(not has_sources and bool(st.session_state.api_key)),
+            type="secondary",
         )
+        if demo_btn:
+            _reset_downstream()
+            with st.spinner("🎭 Reconstructing synthetic knowledge profile..."):
+                time.sleep(1.2)
+            st.session_state.knowledge_profile = DEMO_KNOWLEDGE_PROFILE
+            st.session_state.employee_name = st.session_state.employee_name or "Sarah Chen"
+            st.session_state.project_role = st.session_state.project_role or "Senior Backend Engineer — PayFlow payment microservice"
+            st.session_state.is_demo = True
+            st.session_state.manager_handover = DEMO_MANAGER_HANDOVER
+            st.session_state.newhire_handover = DEMO_NEWHIRE_HANDOVER
+            st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
+            st.session_state.employee_gap_answers = dict(DEMO_EMPLOYEE_GAP_ANSWERS)
+            st.session_state.employee_tribal_knowledge = list(DEMO_EMPLOYEE_TRIBAL_KNOWLEDGE)
+            st.session_state.page = "reconstruct"
+            st.rerun()
 
-        if analyze_btn:
-            if not st.session_state.api_key:
-                # DEMO MODE
-                with st.spinner("🎭 Reconstructing synthetic knowledge profile..."):
-                    time.sleep(1.2)
-                st.session_state.knowledge_profile = DEMO_KNOWLEDGE_PROFILE
-                st.session_state.employee_name = st.session_state.employee_name or "Sarah Chen"
-                st.session_state.project_role = st.session_state.project_role or "Senior Backend Engineer — PayFlow payment microservice"
-                st.session_state.is_demo = True
-                st.session_state.manager_handover = DEMO_MANAGER_HANDOVER
-                st.session_state.newhire_handover = DEMO_NEWHIRE_HANDOVER
-                st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
-                st.session_state.employee_gap_answers = dict(DEMO_EMPLOYEE_GAP_ANSWERS)
-                st.session_state.employee_tribal_knowledge = list(DEMO_EMPLOYEE_TRIBAL_KNOWLEDGE)
-                st.session_state.page = "reconstruct"
-                st.rerun()
-            else:
-                # REAL GEMINI MODE
+        # ── Button 2: Live analysis (only when a key is configured) ──────
+        if st.session_state.api_key:
+            analyze_btn = st.button(
+                "🔍 Analyze & Reconstruct Knowledge",
+                type="primary",
+                use_container_width=True,
+                disabled=not has_sources,
+            )
+            if analyze_btn:
+                _reset_downstream()
                 all_sources = []
                 errors = []
 
@@ -1333,8 +1347,10 @@ if st.session_state.page == "connect":
                         st.session_state.page = "reconstruct"
                         st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Gemini analysis error: {e}")
+                        st.error(f"❌ Gemini analysis error: {_safe_err(e)}")
                         st.info("Check your key at aistudio.google.com")
+        else:
+            st.caption("Live analysis needs a configured key")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
