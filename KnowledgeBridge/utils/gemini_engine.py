@@ -10,12 +10,18 @@ import requests
 from google import genai
 from google.genai import types
 
-# Modern Google Gemini Models for 2026
-PRIMARY_MODEL = "gemini-3.8-flash"
-FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-flash-latest"]
+# Modern Google Gemini Models
+PRIMARY_MODEL = "gemini-2.5-flash"
+FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-flash-latest"]
 
 ANALYZE_PROMPT = """
 You are Baton AI, an institutional knowledge extraction engine. You analyze documents and conversations left behind by a departing employee and reconstruct a structured knowledge profile for seamless team handover.
+
+CRITICAL RULES:
+- Use ONLY the provided source materials. NEVER invent or extrapolate facts.
+- If evidence is missing, write "Not found in sources" with Low confidence.
+- If sources conflict on any claim, mark the claim "Conflicting" and explicitly list both conflicting sources.
+- Every decision and risk MUST include the source file name (or source identifier) and a short exact quote from that source.
 
 Given the following source materials, extract and structure ALL useful knowledge.
 
@@ -29,16 +35,16 @@ Extract and return a JSON object with EXACTLY this structure:
       "text": "Description of the decision made",
       "source": "exact source name/filename",
       "source_type": "file|github|text",
-      "confidence": "HIGH|MEDIUM|LOW",
-      "excerpt": "verbatim or close excerpt from source that supports this"
+      "confidence": "HIGH|MEDIUM|LOW|Conflicting",
+      "excerpt": "short exact quote from source that supports this"
     }}
   ],
   "risks": [
     {{
       "text": "Description of the risk or dependency concern",
       "source": "exact source name",
-      "confidence": "HIGH|MEDIUM|LOW",
-      "excerpt": "supporting excerpt"
+      "confidence": "HIGH|MEDIUM|LOW|Conflicting",
+      "excerpt": "short exact quote from source"
     }}
   ],
   "unresolved": [
@@ -67,15 +73,22 @@ Extract and return a JSON object with EXACTLY this structure:
 CONFIDENCE RULES:
 - HIGH: Multiple sources agree on the same information
 - MEDIUM: Single source mentions it explicitly
-- LOW: Inferred or mentioned ambiguously
+- LOW: Inferred, uncertain, or "Not found in sources"
+- Conflicting: Marked as "Conflicting" when sources contradict each other
 
-Extract at minimum 4-6 decisions, 2-4 risks, 2-3 unresolved questions, any contacts, and any dependencies.
+Extract decisions, risks, unresolved questions, contacts, and dependencies.
 Return ONLY valid JSON. No markdown. No explanation. Just the JSON object.
 """
 
 
 MANAGER_HANDOVER_PROMPT = """
 You are writing a **Manager-level Knowledge Handover Document** for Baton (Knowledge Handover Platform).
+
+CRITICAL GROUNDING RULES:
+- Use ONLY the provided facts from the knowledge profile and sources. NEVER invent or extrapolate facts.
+- If evidence is missing, write "Not found in sources" with Low confidence.
+- If sources conflict, mark the claim "Conflicting" and list both sources.
+- Every decision and risk must include the source file name and a short exact quote.
 
 Based on this knowledge profile:
 {knowledge_json}
@@ -85,8 +98,8 @@ Project/Role: {project_role}
 
 Write a professional Markdown document with these sections:
 1. ## Executive Summary
-2. ## Key Decisions & Rationale (high-level, with business impact)
-3. ## Critical Risks & Mitigation (what could go wrong, what to watch)
+2. ## Key Decisions & Rationale (high-level, with business impact and source citations)
+3. ## Critical Risks & Mitigation (what could go wrong, source citations, what to watch)
 4. ## Ownership & Contacts (who to call for what)
 5. ## External Dependencies & Vendor Relationships
 6. ## Timeline Considerations (what needs attention soon)
@@ -100,6 +113,12 @@ Use clear, professional language. Include ⚠️ for urgent items.
 NEWHIRE_HANDOVER_PROMPT = """
 You are writing a **New Hire / Technical Successor Knowledge Handover Document** for Baton (Knowledge Handover Platform).
 
+CRITICAL GROUNDING RULES:
+- Use ONLY the provided facts from the knowledge profile and sources. NEVER invent or extrapolate facts.
+- If evidence is missing, write "Not found in sources" with Low confidence.
+- If sources conflict, mark the claim "Conflicting" and list both sources.
+- Every decision and risk must include the source file name and a short exact quote.
+
 Based on this knowledge profile:
 {knowledge_json}
 
@@ -108,8 +127,8 @@ Project/Role: {project_role}
 
 Write a comprehensive Markdown document with these sections:
 1. ## Welcome & Context
-2. ## Architecture & Technical Decisions (WHY things were built this way)
-3. ## What NOT To Break (critical paths, gotchas, known landmines)
+2. ## Architecture & Technical Decisions (WHY things were built this way, with source citations)
+3. ## What NOT To Break (critical paths, gotchas, known landmines, with citations)
 4. ## Who To Call (contacts with context on when/why to reach them)
 5. ## Unresolved Technical Debt & Open Questions
 6. ## External Dependencies & Integration Points
@@ -123,6 +142,12 @@ Use ⚠️ for landmines, 💡 for tips, 🔗 for important links/references.
 
 EMPLOYEE_HANDOVER_PROMPT = """
 You are writing an **Employee Notes & Tribal Knowledge Addendum** for Baton (Knowledge Handover Platform).
+
+CRITICAL GROUNDING RULES:
+- Use ONLY the provided facts from the knowledge profile, employee corrections, gap answers, and tribal knowledge. NEVER invent or extrapolate facts.
+- If evidence is missing, write "Not found in sources" with Low confidence.
+- If sources conflict, mark the claim "Conflicting" and list both sources.
+- Every decision and risk must include the source file name and a short exact quote.
 
 The departing employee has reviewed the AI-extracted knowledge profile and provided corrections,
 gap answers, and tribal knowledge. Weave these into a well-structured Markdown document.
@@ -154,38 +179,55 @@ Use ⚠️ for warnings, 💡 for tips, 📝 for notes, 🚫 for "don't do this"
 
 
 def _build_client(api_key: str) -> genai.Client:
-    """Create a Gemini client configured for v1beta with the given API key."""
-    return genai.Client(api_key=api_key.strip(), http_options={"api_version": "v1beta"})
+    """Create a Gemini client configured for v1beta with a 90-second timeout."""
+    return genai.Client(
+        api_key=api_key.strip(),
+        http_options={"api_version": "v1beta", "timeout": 90.0}
+    )
 
 
 def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output_tokens: int = 4096) -> str:
     """
     Call Gemini using official google-genai SDK (v1beta), with fallback across
-    modern models and direct REST endpoint to guarantee compatibility with AQ. keys.
+    working models and direct REST endpoint to guarantee compatibility with AQ. keys.
+    Enforces a strict 90-second timeout on every call.
     """
     key = api_key.strip()
-    client = _build_client(key)
+    failed_models = {}
+    had_timeout = False
 
     # 1. Try SDK with candidate models
-    for model_name in FALLBACK_MODELS:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_output_tokens,
-                ),
-            )
-            if response and response.text:
-                return response.text
-        except Exception:
-            continue
+    try:
+        client = _build_client(key)
+    except Exception as e:
+        client = None
+        failed_models["client_init"] = str(e)
+
+    if client:
+        for model_name in FALLBACK_MODELS:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                        http_options=types.HttpOptions(timeout=90000),
+                    ),
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                err_str = str(e)
+                if "timeout" in err_str.lower() or "timed out" in err_str.lower() or "deadline" in err_str.lower():
+                    had_timeout = True
+                failed_models[f"SDK:{model_name}"] = err_str
+                continue
 
     # 2. Try Direct Google Generative Language REST Endpoint (v1beta)
     for model_name in FALLBACK_MODELS:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
             headers = {
                 "Content-Type": "application/json",
                 "x-goog-api-key": key,
@@ -197,7 +239,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
                     "maxOutputTokens": max_output_tokens,
                 }
             }
-            res = requests.post(url, headers=headers, json=payload, timeout=60)
+            res = requests.post(url, headers=headers, json=payload, timeout=90)
             if res.status_code == 200:
                 data = res.json()
                 candidates = data.get("candidates", [])
@@ -205,12 +247,25 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
                     parts = candidates[0].get("content", {}).get("parts", [])
                     if parts:
                         return parts[0].get("text", "")
-        except Exception:
+            else:
+                failed_models[f"REST:{model_name}"] = f"HTTP {res.status_code}: {res.text[:120]}"
+        except requests.exceptions.Timeout:
+            had_timeout = True
+            failed_models[f"REST:{model_name}"] = "Request timed out after 90s"
+        except Exception as e:
+            err_str = str(e)
+            if "timeout" in err_str.lower() or "timed out" in err_str.lower() or "deadline" in err_str.lower():
+                had_timeout = True
+            failed_models[f"REST:{model_name}"] = err_str
             continue
 
+    if had_timeout:
+        raise TimeoutError("Gemini took too long. Try a smaller file.")
+
+    summary_failed = "; ".join([f"{m}: {err}" for m, err in failed_models.items()])
     raise RuntimeError(
-        "Gemini API request failed across all candidate models (gemini-3.8-flash, gemini-3.5-flash). "
-        "Please verify your AQ. API key has the Generative Language API enabled."
+        f"Gemini API request failed. Models tried and failed: [{summary_failed}]. "
+        "Please verify your API key has the Generative Language API enabled."
     )
 
 
@@ -231,9 +286,13 @@ def analyze_sources(texts: list[dict], api_key: str) -> dict:
         icon = {"file": "📁", "github": "🐙", "text": "📝"}.get(t.get("source_type", "text"), "📄")
         sources_text += f"\n\n--- SOURCE {i}: {icon} [{t['source_type'].upper()}] {t['source']} ---\n"
         content = t["content"]
-        if len(content) > 8000:
-            content = content[:8000] + "\n... [truncated for brevity]"
+        if len(content) > 25000:
+            content = content[:25000] + "\n[Source truncated: only the first 25000 characters were analyzed]\n"
         sources_text += content
+
+    # Keep total cap of 30,000 characters
+    if len(sources_text) > 30000:
+        sources_text = sources_text[:30000] + "\n[Source truncated: only the first 30000 characters were analyzed]\n"
 
     prompt = ANALYZE_PROMPT.format(sources_text=sources_text)
     raw = _call_gemini(prompt, api_key, temperature=0.2, max_output_tokens=4096).strip()

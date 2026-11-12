@@ -5,6 +5,9 @@ Merged Style A (Premium SaaS) + Style B (Bold Plum & Tool Identity)
 
 import copy
 import json
+import os
+import re
+import textwrap
 import time
 import streamlit as st
 
@@ -971,6 +974,11 @@ def init_session_state():
         "employee_gap_answers": {},
         "employee_tribal_knowledge": [],
         "all_sources": [],
+        "analyses_run": 0,
+        "handovers_run": 0,
+        "action_history": [],
+        "acknowledgement": None,
+        "view_role": "Manager",
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -998,6 +1006,29 @@ def _safe_err(e: Exception) -> str:
     if key:
         msg = msg.replace(key, "[hidden]")
     return msg
+
+
+def redact_sensitive_info(text: str) -> str:
+    """Redact sensitive credentials, emails, and phone numbers without modifying normal prose."""
+    if not text:
+        return ""
+
+    # 1. Redact Emails
+    text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', '[REDACTED]', text)
+
+    # 2. Redact Phone numbers (+ country code, (123) 456-7890, or 123-456-7890)
+    # Strictly avoids matching dates (YYYY-MM-DD), version numbers (v2.4), timestamps (12:30:00), or plain numbers
+    phone_pattern = r'(\+\d{1,3}[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b|\(\d{3}\)\s*[-.]?\s*\d{3}[-.]\d{4}\b|\b\d{3}-\d{3}-\d{4}\b)'
+    text = re.sub(phone_pattern, '[REDACTED]', text)
+
+    # 3. Redact specific API keys starting with AIza, ghp_, sk-, or AQ.
+    text = re.sub(r'\b(AIza[0-9A-Za-z-_]{20,}|ghp_[0-9A-Za-z]{20,}|sk-[0-9A-Za-z-_]{20,}|AQ\.[0-9A-Za-z-_]{10,})\b', '[REDACTED]', text)
+
+    # 4. Redact tokens, passwords, secrets, api_keys ONLY when followed by : or = and a value
+    # Does not affect normal sentences like "token refresh logic" or "session token"
+    text = re.sub(r'(?i)\b(api[_-]?key|password|token|secret)\s*[:=]\s*([\'"][^\'"\r\n]+[\'"]|[^\s,;]+)', r'\1: [REDACTED]', text)
+
+    return text
 
 
 # ─── COMPONENT HELPERS ────────────────────────────────────────────────────────
@@ -1063,7 +1094,7 @@ def step_indicator(current_page: str):
             html += '<span class="kb-nav-arrow">→</span>'
     html += '</div>'
 
-    status_label = "🎭 Demo Simulator" if st.session_state.is_demo or not st.session_state.api_key else "⚡ Gemini 1.5 Active"
+    status_label = "🎭 Demo Simulator" if st.session_state.is_demo or not st.session_state.api_key else "⚡ Gemini Active"
     html += f'<div class="kb-nav-status-pill">{status_label}</div>'
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
@@ -1083,9 +1114,14 @@ with st.sidebar:
     st.markdown("---")
 
     if st.session_state.api_key:
-        st.success("Gemini connected")
+        st.markdown(
+            '<div style="background-color: #dcfce7; border: 1px solid #86efac; border-radius: 8px; padding: 10px 14px; margin-bottom: 0.75rem;">'
+            '<span style="color: #14532d !important; font-weight: 700; font-size: 0.9rem;">✅ Gemini connected</span>'
+            '</div>',
+            unsafe_allow_html=True
+        )
     else:
-        st.info("No key configured - demo only")
+        st.info("No Gemini key configured")
 
     st.markdown("---")
     st.markdown("**Workflow Navigation**")
@@ -1212,7 +1248,7 @@ if st.session_state.page == "connect":
         has_gh = bool(st.session_state.github_url.strip())
         text_len = len(st.session_state.pasted_text.strip())
 
-        st.markdown(f"""
+        preview_html = textwrap.dedent(f"""
         <div class="kb-panel-plum">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
                 <h3 style="margin:0; font-size:1.2rem; font-weight:800;">⚡ Live Handover Preview</h3>
@@ -1241,7 +1277,8 @@ if st.session_state.page == "connect":
                 </div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """)
+        st.markdown(preview_html, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1262,38 +1299,20 @@ if st.session_state.page == "connect":
             st.session_state.manager_handover = None
             st.session_state.newhire_handover = None
             st.session_state.employee_handover = None
+            st.session_state.action_history = []
+            st.session_state.acknowledgement = None
 
-        # ── Button 1: Load Demo (always visible) ─────────────────────────
-        demo_btn = st.button(
-            "🎭 Load Demo Example",
+        analyze_btn = st.button(
+            "🔍 Analyze & Reconstruct Knowledge",
+            type="primary",
             use_container_width=True,
-            type="secondary",
+            disabled=not (has_sources and bool(st.session_state.api_key)),
         )
-        if demo_btn:
-            _reset_downstream()
-            with st.spinner("🎭 Reconstructing synthetic knowledge profile..."):
-                time.sleep(1.2)
-            st.session_state.knowledge_profile = DEMO_KNOWLEDGE_PROFILE
-            st.session_state.employee_name = st.session_state.employee_name or "Sarah Chen"
-            st.session_state.project_role = st.session_state.project_role or "Senior Backend Engineer — PayFlow payment microservice"
-            st.session_state.is_demo = True
-            st.session_state.manager_handover = DEMO_MANAGER_HANDOVER
-            st.session_state.newhire_handover = DEMO_NEWHIRE_HANDOVER
-            st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
-            st.session_state.employee_gap_answers = dict(DEMO_EMPLOYEE_GAP_ANSWERS)
-            st.session_state.employee_tribal_knowledge = list(DEMO_EMPLOYEE_TRIBAL_KNOWLEDGE)
-            st.session_state.page = "reconstruct"
-            st.rerun()
-
-        # ── Button 2: Live analysis (only when a key is configured) ──────
-        if st.session_state.api_key:
-            analyze_btn = st.button(
-                "🔍 Analyze & Reconstruct Knowledge",
-                type="primary",
-                use_container_width=True,
-                disabled=not has_sources,
-            )
-            if analyze_btn:
+        if analyze_btn:
+            if st.session_state.analyses_run >= 3:
+                st.warning("Session limit reached. Please refresh the page to start a new session.")
+            else:
+                st.session_state.analyses_run += 1
                 _reset_downstream()
                 all_sources = []
                 errors = []
@@ -1305,7 +1324,7 @@ if st.session_state.page == "connect":
                             file_results = process_files(st.session_state.uploaded_files)
                             all_sources.extend(file_results)
                         except Exception as e:
-                            errors.append(f"File parsing: {e}")
+                            errors.append(f"File parsing: {_safe_err(e)}")
 
                     if st.session_state.github_url.strip():
                         try:
@@ -1316,7 +1335,7 @@ if st.session_state.page == "connect":
                             )
                             all_sources.extend(github_results)
                         except Exception as e:
-                            errors.append(f"GitHub connector: {e}")
+                            errors.append(f"GitHub connector: {_safe_err(e)}")
 
                     if st.session_state.pasted_text.strip():
                         all_sources.append({
@@ -1336,6 +1355,22 @@ if st.session_state.page == "connect":
                     st.error("Please add at least one file, repo, or note to proceed.")
                     st.stop()
 
+                # Cut total input text to 30,000 characters before sending
+                total_len = sum(len(s.get("content", "")) for s in all_sources)
+                if total_len > 30000:
+                    running = 0
+                    trimmed = []
+                    for s in all_sources:
+                        rem = 30000 - running
+                        if rem <= 0:
+                            break
+                        c = s.get("content", "")
+                        if len(c) > rem:
+                            c = c[:rem] + "\n[Source truncated: only the first 30000 characters were analyzed]"
+                        trimmed.append({**s, "content": c})
+                        running += len(c)
+                    all_sources = trimmed
+
                 st.session_state.all_sources = all_sources
 
                 with st.spinner(f"🤖 Reconstructing knowledge graph across {len(all_sources)} source(s)..."):
@@ -1349,8 +1384,6 @@ if st.session_state.page == "connect":
                     except Exception as e:
                         st.error(f"❌ Gemini analysis error: {_safe_err(e)}")
                         st.info("Check your key at aistudio.google.com")
-        else:
-            st.caption("Live analysis needs a configured key")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1868,22 +1901,58 @@ elif st.session_state.page == "review":
 
         with col_rev2:
             st.markdown("<br>", unsafe_allow_html=True)
-            approved = st.checkbox(
-                f"✅ Sign off on {section_title}",
-                value=st.session_state.approvals.get(section_id, False),
-                key=f"approve_{section_id}"
-            )
-            st.session_state.approvals[section_id] = approved
+            current_status = st.session_state.approvals.get(section_id, None)
 
-            if approved:
+            btn_app_col, btn_rej_col = st.columns(2)
+            with btn_app_col:
+                if st.button("✅ Approve", key=f"btn_app_{section_id}", use_container_width=True):
+                    st.session_state.approvals[section_id] = True
+                    st.session_state.action_history.append({
+                        "who": "Manager",
+                        "action": f"Approved {section_title}",
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "reason": st.session_state.corrections.get(section_id, "Approved") or "Approved"
+                    })
+                    st.rerun()
+
+            with btn_rej_col:
+                if st.button("❌ Reject", key=f"btn_rej_{section_id}", use_container_width=True):
+                    rej_text = st.session_state.get(f"rej_reason_{section_id}", "").strip() or "Rejected by manager"
+                    st.session_state.approvals[section_id] = "rejected"
+                    st.session_state.action_history.append({
+                        "who": "Manager",
+                        "action": f"Rejected {section_title}",
+                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "reason": rej_text
+                    })
+                    st.rerun()
+
+            st.text_input(
+                f"Rejection reason for {section_title}:",
+                key=f"rej_reason_{section_id}",
+                placeholder="Reason if rejecting...",
+                label_visibility="collapsed"
+            )
+
+            if current_status is True:
                 st.success("✅ Section Approved")
+            elif current_status == "rejected":
+                st.error("❌ Section Rejected")
+                all_approved = False
             else:
                 st.warning("⏳ Pending Approval")
                 all_approved = False
 
         st.markdown("---")
 
-    approved_count = sum(1 for v in st.session_state.approvals.values() if v)
+    with st.expander("📜 Version History Log (Audited Actions)", expanded=False):
+        if st.session_state.action_history:
+            for entry in reversed(st.session_state.action_history):
+                st.markdown(f"- **{entry['timestamp']}** — *{entry['who']}*: **{entry['action']}** (Reason/Note: `{entry.get('reason', 'N/A')}`)")
+        else:
+            st.caption("No review actions recorded yet.")
+
+    approved_count = sum(1 for v in st.session_state.approvals.values() if v is True)
     total_sections = len(sections)
 
     st.markdown(f"### 📊 Approval Status: {approved_count}/{total_sections} sections approved")
@@ -1907,103 +1976,107 @@ elif st.session_state.page == "review":
             use_container_width=True,
             disabled=btn_disabled,
         ):
-            if st.session_state.is_demo:
-                st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
-                st.session_state.page = "handover"
-                st.rerun()
+            if st.session_state.handovers_run >= 3:
+                st.warning("Session limit reached. Please refresh the page to start a new session.")
             else:
-                # Real Gemini generation
+                st.session_state.handovers_run += 1
+                if st.session_state.is_demo:
+                    st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
+                    st.session_state.page = "handover"
+                    st.rerun()
+                else:
+                    # Real Gemini generation
 
-                # ── Build reviewed_profile: apply employee verifications and
-                #    attach manager notes before passing to Gemini ──────────────
-                reviewed_profile = copy.deepcopy(profile)
+                    # ── Build reviewed_profile: apply employee verifications and
+                    #    attach manager notes before passing to Gemini ──────────────
+                    reviewed_profile = copy.deepcopy(profile)
 
-                # Decisions: iterate original list by index to keep key alignment
-                filtered_decisions = []
-                for idx, decision in enumerate(profile.get("decisions", [])):
-                    verif = st.session_state.employee_verifications.get(
-                        f"decision_{idx}", {}
-                    )
-                    status = verif.get("status", "")
-                    if status == "Inaccurate / Outdated":
-                        continue  # drop entirely
-                    item = copy.deepcopy(decision)
-                    if status == "Needs Context" and verif.get("note"):
-                        item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
-                    filtered_decisions.append(item)
-                reviewed_profile["decisions"] = filtered_decisions
-
-                # Risks: use original list indices; different status labels
-                filtered_risks = []
-                for idx, risk in enumerate(profile.get("risks", [])):
-                    verif = st.session_state.employee_verifications.get(
-                        f"risk_{idx}", {}
-                    )
-                    status = verif.get("status", "")
-                    if status == "False Alarm / Resolved":
-                        continue  # drop entirely
-                    item = copy.deepcopy(risk)
-                    if status == "Mitigated / Low Priority":
-                        suffix = " [Employee: mitigated / low priority]"
-                        if verif.get("note"):
-                            suffix += f" [Employee note: {verif['note']}]"
-                        item["text"] = item["text"] + suffix
-                    elif status == "Active Risk" and verif.get("note"):
-                        item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
-                    filtered_risks.append(item)
-                reviewed_profile["risks"] = filtered_risks
-
-                # Manager notes: map section_id → note text
-                reviewed_profile["manager_notes"] = dict(st.session_state.corrections)
-                # ─────────────────────────────────────────────────────────────
-
-                with st.spinner("🤖 Generating Manager Handover with Gemini..."):
-                    try:
-                        from utils.gemini_engine import generate_manager_handover
-                        mgr = generate_manager_handover(
-                            reviewed_profile,
-                            st.session_state.employee_name,
-                            st.session_state.project_role,
-                            st.session_state.api_key
+                    # Decisions: iterate original list by index to keep key alignment
+                    filtered_decisions = []
+                    for idx, decision in enumerate(profile.get("decisions", [])):
+                        verif = st.session_state.employee_verifications.get(
+                            f"decision_{idx}", {}
                         )
-                        st.session_state.manager_handover = mgr
-                    except Exception as e:
-                        st.error(f"❌ Manager handover generation failed: {e}")
-                        st.stop()
+                        status = verif.get("status", "")
+                        if status == "Inaccurate / Outdated":
+                            continue  # drop entirely
+                        item = copy.deepcopy(decision)
+                        if status == "Needs Context" and verif.get("note"):
+                            item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
+                        filtered_decisions.append(item)
+                    reviewed_profile["decisions"] = filtered_decisions
 
-                with st.spinner("🤖 Generating Technical Successor Handover with Gemini..."):
-                    try:
-                        from utils.gemini_engine import generate_newhire_handover
-                        nh = generate_newhire_handover(
-                            reviewed_profile,
-                            st.session_state.employee_name,
-                            st.session_state.project_role,
-                            st.session_state.api_key
+                    # Risks: use original list indices; different status labels
+                    filtered_risks = []
+                    for idx, risk in enumerate(profile.get("risks", [])):
+                        verif = st.session_state.employee_verifications.get(
+                            f"risk_{idx}", {}
                         )
-                        st.session_state.newhire_handover = nh
-                    except Exception as e:
-                        st.error(f"❌ New hire handover generation failed: {e}")
-                        st.stop()
+                        status = verif.get("status", "")
+                        if status == "False Alarm / Resolved":
+                            continue  # drop entirely
+                        item = copy.deepcopy(risk)
+                        if status == "Mitigated / Low Priority":
+                            suffix = " [Employee: mitigated / low priority]"
+                            if verif.get("note"):
+                                suffix += f" [Employee note: {verif['note']}]"
+                            item["text"] = item["text"] + suffix
+                        elif status == "Active Risk" and verif.get("note"):
+                            item["text"] = item["text"] + f" [Employee note: {verif['note']}]"
+                        filtered_risks.append(item)
+                    reviewed_profile["risks"] = filtered_risks
 
-                with st.spinner("🤖 Weaving Employee Notes & Tribal Knowledge with Gemini..."):
-                    try:
-                        from utils.gemini_engine import generate_employee_handover
-                        emp_doc = generate_employee_handover(
-                            profile,
-                            st.session_state.employee_name,
-                            st.session_state.project_role,
-                            st.session_state.employee_verifications,
-                            st.session_state.employee_gap_answers,
-                            st.session_state.employee_tribal_knowledge,
-                            st.session_state.api_key
-                        )
-                        st.session_state.employee_handover = emp_doc
-                    except Exception as e:
-                        st.warning(f"Employee handover note: {e}")
-                        st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
+                    # Manager notes: map section_id → note text
+                    reviewed_profile["manager_notes"] = dict(st.session_state.corrections)
+                    # ─────────────────────────────────────────────────────────────
 
-                st.session_state.page = "handover"
-                st.rerun()
+                    with st.spinner("🤖 Generating Manager Handover with Gemini..."):
+                        try:
+                            from utils.gemini_engine import generate_manager_handover
+                            mgr = generate_manager_handover(
+                                reviewed_profile,
+                                st.session_state.employee_name,
+                                st.session_state.project_role,
+                                st.session_state.api_key
+                            )
+                            st.session_state.manager_handover = mgr
+                        except Exception as e:
+                            st.error(f"❌ Manager handover generation failed: {_safe_err(e)}")
+                            st.stop()
+
+                    with st.spinner("🤖 Generating Technical Successor Handover with Gemini..."):
+                        try:
+                            from utils.gemini_engine import generate_newhire_handover
+                            nh = generate_newhire_handover(
+                                reviewed_profile,
+                                st.session_state.employee_name,
+                                st.session_state.project_role,
+                                st.session_state.api_key
+                            )
+                            st.session_state.newhire_handover = nh
+                        except Exception as e:
+                            st.error(f"❌ New hire handover generation failed: {_safe_err(e)}")
+                            st.stop()
+
+                    with st.spinner("🤖 Weaving Employee Notes & Tribal Knowledge with Gemini..."):
+                        try:
+                            from utils.gemini_engine import generate_employee_handover
+                            emp_doc = generate_employee_handover(
+                                profile,
+                                st.session_state.employee_name,
+                                st.session_state.project_role,
+                                st.session_state.employee_verifications,
+                                st.session_state.employee_gap_answers,
+                                st.session_state.employee_tribal_knowledge,
+                                st.session_state.api_key
+                            )
+                            st.session_state.employee_handover = emp_doc
+                        except Exception as e:
+                            st.warning(f"Employee handover note: {_safe_err(e)}")
+                            st.session_state.employee_handover = DEMO_EMPLOYEE_HANDOVER
+
+                    st.session_state.page = "handover"
+                    st.rerun()
 
     with col_gen2:
         if st.button("← Back to Employee View", use_container_width=True):
@@ -2039,7 +2112,7 @@ elif st.session_state.page == "handover":
     project = st.session_state.project_role or "Key System Contributor"
 
     # Executive Plum Container
-    st.markdown(f"""
+    header_html = textwrap.dedent(f"""
     <div class="kb-panel-plum" style="margin-bottom:1.5rem;">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
             <div>
@@ -2056,53 +2129,102 @@ elif st.session_state.page == "handover":
             <b>Knowledge Holder:</b> {employee} &nbsp;|&nbsp; <b>Scope:</b> {project}
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
+    st.markdown(header_html, unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["👔 Manager View", "👩‍💻 Technical Successor View", "👤 Employee Notes"])
+    # ── Role-Based Access Control Selector & Badge ────────────────────────────
+    role_col1, role_col2 = st.columns([3, 1])
+    with role_col1:
+        current_role_idx = ["Manager", "Technical Successor", "Employee"].index(st.session_state.get("view_role", "Manager")) if st.session_state.get("view_role") in ["Manager", "Technical Successor", "Employee"] else 0
+        selected_role = st.selectbox(
+            "👤 View Handover Perspective As:",
+            ["Manager", "Technical Successor", "Employee"],
+            index=current_role_idx,
+            key="handover_view_role"
+        )
+        st.session_state.view_role = selected_role
+    with role_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="text-align:right;"><span class="badge badge-high" style="font-size:0.88rem; padding:8px 16px;">🛡️ Access: {selected_role}</span></div>',
+            unsafe_allow_html=True
+        )
 
-    with tab1:
+    st.markdown("---")
+
+    # ── Role 1: Manager View ──────────────────────────────────────────────────
+    if selected_role == "Manager":
         st.markdown("### 👔 Manager Handover Document")
         st.markdown("*Executive risk summary, business impact, vendor expiration timeline, and required management actions.*")
         st.markdown("---")
-        st.markdown(st.session_state.manager_handover)
+        raw_manager = st.session_state.manager_handover or ""
+        redacted_manager = redact_sensitive_info(raw_manager)
+        st.markdown(redacted_manager)
         st.markdown("---")
 
-        manager_md = st.session_state.manager_handover
         st.download_button(
             label="📥 Download Manager Handover (Markdown)",
-            data=manager_md,
+            data=redacted_manager,
             file_name=f"handover_manager_{employee.replace(' ', '_')}.md",
             mime="text/markdown",
             use_container_width=True,
         )
 
-    with tab2:
+    # ── Role 2: Technical Successor View ──────────────────────────────────────
+    elif selected_role == "Technical Successor":
         st.markdown("### 👩‍💻 Technical Successor Handover")
         st.markdown("*Deep architectural rationale, known landmines, critical paths, and local setup checklist.*")
         st.markdown("---")
-        st.markdown(st.session_state.newhire_handover)
+        raw_successor = st.session_state.newhire_handover or ""
+        redacted_successor = redact_sensitive_info(raw_successor)
+        st.markdown(redacted_successor)
         st.markdown("---")
 
-        newhire_md = st.session_state.newhire_handover
+        # Successor Receipt Acknowledgment
+        st.markdown("#### ✍️ Successor Handover Receipt Acknowledgment")
+        if st.session_state.acknowledgement:
+            ack_info = st.session_state.acknowledgement
+            st.success(f"✅ Acknowledged by {ack_info['name']} at {ack_info['time']}")
+        else:
+            ack_c1, ack_c2 = st.columns([2, 1])
+            with ack_c1:
+                succ_name_input = st.text_input(
+                    "Successor Name:",
+                    placeholder="Enter your name to acknowledge receipt...",
+                    key="succ_name_ack"
+                )
+            with ack_c2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🤝 Acknowledge receipt", key="btn_ack_receipt", use_container_width=True):
+                    confirmed_name = succ_name_input.strip() or "Successor"
+                    st.session_state.acknowledgement = {
+                        "name": confirmed_name,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    st.rerun()
+
+        st.markdown("---")
         st.download_button(
             label="📥 Download Successor Handover (Markdown)",
-            data=newhire_md,
+            data=redacted_successor,
             file_name=f"handover_successor_{employee.replace(' ', '_')}.md",
             mime="text/markdown",
             use_container_width=True,
         )
 
-    with tab3:
+    # ── Role 3: Employee Notes View ───────────────────────────────────────────
+    elif selected_role == "Employee":
         st.markdown("### 👤 Employee Notes & Tribal Knowledge")
         st.markdown("*First-person context, verified architectural decisions, resolved blind spots, and unwritten operational tips.*")
         st.markdown("---")
-        emp_notes_content = st.session_state.employee_handover or DEMO_EMPLOYEE_HANDOVER
-        st.markdown(emp_notes_content)
+        raw_employee = st.session_state.employee_handover or DEMO_EMPLOYEE_HANDOVER
+        redacted_employee = redact_sensitive_info(raw_employee)
+        st.markdown(redacted_employee)
         st.markdown("---")
 
         st.download_button(
             label="📥 Download Employee Notes (Markdown)",
-            data=emp_notes_content,
+            data=redacted_employee,
             file_name=f"handover_employee_{employee.replace(' ', '_')}.md",
             mime="text/markdown",
             use_container_width=True,
@@ -2116,17 +2238,18 @@ elif st.session_state.page == "handover":
                         "manager_handover", "newhire_handover", "employee_handover",
                         "employee_verifications", "employee_gap_answers", "employee_tribal_knowledge",
                         "all_sources", "employee_name", "project_role", "github_url", "github_token",
-                        "pasted_text", "uploaded_files"]:
+                        "pasted_text", "uploaded_files", "action_history", "acknowledgement"]:
                 if "approvals" in key or "corrections" in key or "verifications" in key or "gap_answers" in key:
                     st.session_state[key] = {}
-                elif "sources" in key or "tribal_knowledge" in key:
+                elif "sources" in key or "tribal_knowledge" in key or "history" in key:
                     st.session_state[key] = []
-                elif key == "uploaded_files":
+                elif key in ("uploaded_files", "acknowledgement"):
                     st.session_state[key] = None
                 elif key == "is_demo":
                     st.session_state[key] = False
                 else:
                     st.session_state[key] = ""
+            st.session_state.view_role = "Manager"
             st.session_state.page = "connect"
             st.rerun()
 
