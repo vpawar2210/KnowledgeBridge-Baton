@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.0.0",
+  "dataset_id": "HARBORLINE-BATON-DEMO-001",
+  "dataset_name": "Harborline Knowledge Handover Demo",
+  "dataset_notice": "Synthetic demo dataset for the Baton Harborline handover workflow.",
+  "company": {
+    "id": "ORG-HARBORLINE-DEMO",
+    "name": "Harborline",
+    "is_fictional": true
+  },
+  "workspace": {
+    "id": "WS-HARBORLINE-001",
+    "name": "Harborline Platform Operations Handover",
+    "status": "employee_submitted_for_review",
+    "employee_id": "USR-EMP-001",
+    "manager_id": "USR-MGR-001",
+    "successor_id": "USR-SUC-001"
+  },
+  "accounts": [
+    {"id": "USR-EMP-001", "display_name": "Sarah Chen", "email": "sarah.chen@harborline.example", "role": "employee", "demo_account": true, "active": true},
+    {"id": "USR-MGR-001", "display_name": "Manager Demo", "email": "manager@harborline.example", "role": "manager", "demo_account": true, "active": true},
+    {"id": "USR-SUC-001", "display_name": "Marcus Reed", "email": "marcus.reed@harborline.example", "role": "successor", "demo_account": true, "active": true}
+  ],
+  "files": [
+    {"id": "DOC-INC-001", "path": "Platform/Incident Response/incident_postmortem_2026-03-14.pdf", "title": "Incident Postmortem: 14 March 2026", "render_as": "pdf", "classification": "internal", "owner": "Platform Operations", "current_version": "1.2", "finding_ids": ["F-001", "F-002", "F-003"]},
+    {"id": "DOC-SEC-002", "path": "Platform/Security/session_security_policy.md", "title": "Session Security and Access Policy", "render_as": "markdown", "classification": "internal", "owner": "Security Engineering", "current_version": "2.1", "finding_ids": ["F-004", "F-005", "F-006"], "version_history": [{"version": "1.0", "path": "Platform/Security/versions/session_security_policy_v1.md", "status": "superseded"}]},
+    {"id": "DOC-API-003", "path": "Platform/API/api_rate_limits.csv", "title": "API Rate Limits and Delivery Rules", "render_as": "csv", "classification": "internal", "owner": "API Platform", "current_version": "1.0", "finding_ids": ["F-007", "F-008", "F-009"]},
+    {"id": "DOC-REF-004", "path": "Operations/Refunds/refund_approval_policy.pdf", "title": "Customer Refund and Goodwill Policy", "render_as": "pdf", "classification": "internal", "owner": "Customer Operations", "current_version": "1.4", "finding_ids": ["F-010", "F-011", "F-012"]},
+    {"id": "DOC-SUP-005", "path": "Operations/Support/support_escalation_runbook.md", "title": "Support Escalation Runbook", "render_as": "markdown", "classification": "internal", "owner": "Customer Operations", "current_version": "3.0", "finding_ids": ["F-012"], "version_history": [{"version": "2.0", "path": "Operations/Support/versions/support_escalation_runbook_v2.md", "status": "superseded"}]},
+    {"id": "DOC-REL-006", "path": "Engineering/Release/release_checklist.txt", "title": "Release Checklist", "render_as": "text", "classification": "internal", "owner": "Release Engineering", "current_version": "1.3", "finding_ids": ["F-013", "F-014"]},
+    {"id": "DOC-ARC-007", "path": "Engineering/Architecture/service_architecture_overview.pdf", "title": "Service Architecture Overview", "render_as": "pdf", "classification": "internal", "owner": "Engineering Enablement", "current_version": "1.1", "finding_ids": []},
+    {"id": "DOC-TRB-008", "path": "People/Knowledge Transfer/operational_tribal_knowledge.md", "title": "Operational Tribal Knowledge", "render_as": "markdown", "classification": "confidential", "owner": "Sarah Chen", "current_version": "1.0", "finding_ids": ["F-016"]},
+    {"id": "DOC-FIN-009", "path": "Finance/Refunds/refund_approval_matrix.csv", "title": "Refund Approval Matrix", "render_as": "csv", "classification": "confidential", "owner": "Finance Operations", "current_version": "1.0", "finding_ids": ["F-011"]},
+    {"id": "DOC-BCP-010", "path": "Leadership/Business Continuity/continuity_contact_routing.txt", "title": "Business Continuity Contact Routing", "render_as": "text", "classification": "confidential", "owner": "Business Continuity Office", "current_version": "1.0", "finding_ids": []},
+    {"id": "DOC-MON-011", "path": "Leadership/Monitoring/monitoring_alert_catalog.pdf", "title": "Monitoring and Alert Catalog", "render_as": "pdf", "classification": "confidential", "owner": "Platform Operations", "current_version": "1.0", "finding_ids": []},
+    {"id": "DOC-COM-012", "path": "Support/Customer Success/customer_communication_templates.md", "title": "Customer Communication Templates", "render_as": "markdown", "classification": "internal", "owner": "Customer Success", "current_version": "1.0", "finding_ids": []},
+    {"id": "DOC-SHF-013", "path": "Operations/Shift Handover/shift_handover_notes.txt", "title": "Shift Handover Notes", "render_as": "text", "classification": "internal", "owner": "Customer Operations", "current_version": "1.0", "finding_ids": []}
+  ],
+  "version_history": [
+    {"document_id": "DOC-SEC-002", "version": "1.0", "path": "Platform/Security/versions/session_security_policy_v1.md", "status": "superseded"},
+    {"document_id": "DOC-SUP-005", "version": "2.0", "path": "Operations/Support/versions/support_escalation_runbook_v2.md", "status": "superseded"}
+  ],
+  "knowledge_profile": {
+    "employee_id": "USR-EMP-001",
+    "role_scope": "Platform Operations and Customer Operations handover",
+    "reconstruction_status": "completed",
+    "submitted_for_review": true,
+    "sections": ["Incident and Reliability", "Security and Access", "API and Integrations", "Customer Operations", "Release and Service Operations", "Team Knowledge and Unwritten Rules"],
+    "finding_count": 16
+  },
+  "findings": [
+    {"id": "F-001", "section": "Incident and Reliability", "title": "Outage start time", "summary": "The customer-facing outage began at 09:12 IST.", "source_document_id": "DOC-INC-001", "source_quote": "The customer-facing outage began at 09:12 IST and service was restored at 09:50 IST.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-002", "section": "Incident and Reliability", "title": "Incident duration", "summary": "The incident lasted 38 minutes.", "source_document_id": "DOC-INC-001", "source_quote": "The incident duration was 38 minutes.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-003", "section": "Incident and Reliability", "title": "Incident trigger", "summary": "Connection-pool exhaustion occurred during a downstream timeout spike.", "source_document_id": "DOC-INC-001", "source_quote": "The 14 March 2026 event was triggered by a connection-pool exhaustion condition during a downstream timeout spike.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-004", "section": "Security and Access", "title": "Access-token lifetime", "summary": "Access tokens expire after 15 minutes.", "source_document_id": "DOC-SEC-002", "source_quote": "Access tokens have a 15 minute lifetime.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-005", "section": "Security and Access", "title": "Role-claim refresh", "summary": "A role change applies after session claims are refreshed.", "source_document_id": "DOC-SEC-002", "source_quote": "A role change takes effect on the next authenticated request after session claims are refreshed.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-006", "section": "Security and Access", "title": "Confidential source access", "summary": "Confidential source files are restricted to the employee and authorised managers.", "source_document_id": "DOC-SEC-002", "source_quote": "Confidential source files are available only to the Employee and authorised Manager roles.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-007", "section": "API and Integrations", "title": "Default API limit", "summary": "The default public API limit is 50 requests per second per client key.", "source_document_id": "DOC-API-003", "source_quote": "requests per second per client key", "confidence": "high", "status": "pending_review"},
+    {"id": "F-008", "section": "API and Integrations", "title": "Rate-limit response", "summary": "Rate-limited requests return HTTP 429 and a Retry-After header.", "source_document_id": "DOC-API-003", "source_quote": "Retry-After header", "confidence": "high", "status": "pending_review"},
+    {"id": "F-009", "section": "API and Integrations", "title": "Webhook retry policy", "summary": "Outbound webhook delivery is retried three times using exponential backoff.", "source_document_id": "DOC-API-003", "source_quote": "exponential backoff", "confidence": "high", "status": "pending_review"},
+    {"id": "F-010", "section": "Customer Operations", "title": "Frontline refund authority", "summary": "Frontline agents may approve eligible goodwill refunds up to INR 5,00,000.", "source_document_id": "DOC-REF-004", "source_quote": "A frontline agent may approve a goodwill refund up to INR 5,00,000 only when the documented eligibility checks pass.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-011", "section": "Customer Operations", "title": "Refund escalation threshold", "summary": "Refunds above INR 5,00,000 require Finance Director approval.", "source_document_id": "DOC-REF-004", "source_quote": "Refunds above INR 5,00,000 require Finance Director approval.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-012", "section": "Customer Operations", "title": "Refund communication guardrail", "summary": "Support must check payment records and the case timeline before promising a refund.", "source_document_id": "DOC-REF-004", "source_quote": "Do not promise a refund until the payment record and case timeline have been checked.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-013", "section": "Release and Service Operations", "title": "Severity 1 deployment freeze", "summary": "Deployments pause while a Severity 1 incident is active.", "source_document_id": "DOC-REL-006", "source_quote": "Deployments are paused during an active Severity 1 incident.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-014", "section": "Release and Service Operations", "title": "Rollback evidence", "summary": "The release owner records the rollback command before requesting production approval.", "source_document_id": "DOC-REL-006", "source_quote": "The release owner must record the rollback command before requesting production approval.", "confidence": "high", "status": "pending_review"},
+    {"id": "F-015", "section": "Team Knowledge and Unwritten Rules", "title": "Noisy alert triage", "summary": "Check the support queue before paging on-call when alert noise makes customer impact unclear.", "source_note_id": "NOTE-004", "source_quote": "When the alert is noisy but customer impact is unclear, check the support queue before paging the on-call engineer.", "confidence": "medium", "status": "pending_review"},
+    {"id": "F-016", "section": "Team Knowledge and Unwritten Rules", "title": "Daily reconciliation timing", "summary": "The export is generated after the upstream ledger closes at 18:00 IST.", "source_note_id": "NOTE-002", "source_quote": "The daily reconciliation export is generated after 18:30 IST because the upstream ledger closes at 18:00 IST.", "confidence": "medium", "status": "pending_review"}
+  ],
+  "questions": [
+    {"id": "Q-001", "question": "What caused the 14 March 2026 service interruption?", "status": "answered", "answer": "The postmortem attributes it to connection-pool exhaustion during a downstream timeout spike.", "answered_by": "Sarah Chen", "source_document_ids": ["DOC-INC-001"]},
+    {"id": "Q-002", "question": "What is the default public API rate limit?", "status": "answered", "answer": "50 requests per second per client key.", "answered_by": "Sarah Chen", "source_document_ids": ["DOC-API-003"]},
+    {"id": "Q-003", "question": "Who approves a refund above INR 5,00,000?", "status": "answered", "answer": "The Finance Director, according to the refund approval policy.", "answered_by": "Sarah Chen", "source_document_ids": ["DOC-REF-004", "DOC-FIN-009"]},
+    {"id": "Q-004", "question": "Which dashboard should be used first when deploy and service metrics disagree?", "status": "open", "answer": null, "answered_by": null, "source_document_ids": ["DOC-TRB-008"]},
+    {"id": "Q-005", "question": "What exact command is used to recycle the affected worker pool?", "status": "open", "answer": null, "answered_by": null, "source_document_ids": ["DOC-INC-001"]},
+    {"id": "Q-006", "question": "What is the escalation contact for a delayed ledger close?", "status": "open", "answer": null, "answered_by": null, "source_document_ids": ["DOC-BCP-010"]},
+    {"id": "Q-007", "question": "What evidence is required before a release rollback is closed?", "status": "open", "answer": null, "answered_by": null, "source_document_ids": ["DOC-REL-006"]},
+    {"id": "Q-008", "question": "Which confidential tribal-knowledge items may be published to the successor?", "status": "open", "answer": null, "answered_by": null, "source_document_ids": ["DOC-TRB-008"]}
+  ],
+  "employee_notes": [
+    {"id": "NOTE-001", "author": "Sarah Chen", "created_at": "2026-10-22T10:15:00+05:30", "classification": "internal", "title": "Telemetry dashboard discrepancy", "content": "If the deploy dashboard and service dashboard disagree, trust the service dashboard for customer impact until telemetry catches up. Record the discrepancy and revisit it after the next telemetry refresh."},
+    {"id": "NOTE-002", "author": "Sarah Chen", "created_at": "2026-10-22T11:40:00+05:30", "classification": "internal", "title": "Reconciliation timing", "content": "The daily reconciliation export is generated after 18:30 IST because the upstream ledger closes at 18:00 IST."},
+    {"id": "NOTE-003", "author": "Sarah Chen", "created_at": "2026-10-23T09:05:00+05:30", "classification": "internal", "title": "Handover evidence format", "content": "For a handover, include the exact command and the expected output; a screenshot alone is not enough."},
+    {"id": "NOTE-004", "author": "Sarah Chen", "created_at": "2026-10-23T16:20:00+05:30", "classification": "confidential", "title": "Noisy alert first check", "content": "When the alert is noisy but customer impact is unclear, check the support queue before paging the on-call engineer."}
+  ],
+  "review_sections": [
+    {"id": "REV-001", "name": "Incident and Reliability", "status": "pending", "finding_ids": ["F-001", "F-002", "F-003"]},
+    {"id": "REV-002", "name": "Security and Access", "status": "pending", "finding_ids": ["F-004", "F-005", "F-006"]},
+    {"id": "REV-003", "name": "API and Integrations", "status": "pending", "finding_ids": ["F-007", "F-008", "F-009"]},
+    {"id": "REV-004", "name": "Customer Operations", "status": "pending", "finding_ids": ["F-010", "F-011", "F-012"]},
+    {"id": "REV-005", "name": "Release and Service Operations", "status": "pending", "finding_ids": ["F-013", "F-014"]},
+    {"id": "REV-006", "name": "Team Knowledge and Unwritten Rules", "status": "pending", "finding_ids": ["F-015", "F-016"]}
+  ],
+  "access_requests": [{"id": "REQ-001", "requester_id": "USR-SUC-001", "requested_permission": "write", "resource_id": "WS-HARBORLINE-001", "status": "pending", "created_at": "2026-10-24T09:12:00+05:30"}],
+  "notifications": [
+    {"id": "NOT-001", "recipient_role": "manager", "title": "Employee submitted reconstructed knowledge", "body": "Sarah Chen has submitted the current knowledge findings for review.", "read": false, "created_at": "2026-10-24T09:00:00+05:30"},
+    {"id": "NOT-002", "recipient_role": "manager", "title": "Confidential note requires review", "body": "One employee note is classified confidential and needs an explicit publication decision.", "read": false, "created_at": "2026-10-24T09:05:00+05:30"},
+    {"id": "NOT-003", "recipient_role": "manager", "title": "Successor requested write access", "body": "Marcus Reed has one pending request for write access to the handover workspace.", "read": false, "created_at": "2026-10-24T09:12:00+05:30"}
+  ],
+  "audit_log": [
+    {"id": "AUD-001", "timestamp": "2026-10-20T09:00:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "demo_session_started", "summary": "Employee demo session started."},
+    {"id": "AUD-002", "timestamp": "2026-10-20T09:08:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "source_uploaded", "summary": "Uploaded incident postmortem source DOC-INC-001."},
+    {"id": "AUD-003", "timestamp": "2026-10-20T09:10:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "source_uploaded", "summary": "Uploaded session security policy DOC-SEC-002."},
+    {"id": "AUD-004", "timestamp": "2026-10-20T09:14:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "source_uploaded", "summary": "Uploaded API rate-limit CSV DOC-API-003."},
+    {"id": "AUD-005", "timestamp": "2026-10-20T09:18:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "source_uploaded", "summary": "Uploaded refund policy DOC-REF-004."},
+    {"id": "AUD-006", "timestamp": "2026-10-20T09:25:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "reconstruction_started", "summary": "Started knowledge reconstruction for the Harborline workspace."},
+    {"id": "AUD-007", "timestamp": "2026-10-20T09:27:00+05:30", "actor_role": "system", "actor_name": "Baton System", "event_type": "reconstruction_completed", "summary": "Reconstruction generated 16 evidence-linked findings."},
+    {"id": "AUD-008", "timestamp": "2026-10-20T09:35:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "question_answered", "summary": "Answered Q-001 about the 14 March incident."},
+    {"id": "AUD-009", "timestamp": "2026-10-20T09:39:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "question_answered", "summary": "Answered Q-002 about the API rate limit."},
+    {"id": "AUD-010", "timestamp": "2026-10-20T09:44:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "question_answered", "summary": "Answered Q-003 about refund approval."},
+    {"id": "AUD-011", "timestamp": "2026-10-21T10:05:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "note_added", "summary": "Added operational note NOTE-001."},
+    {"id": "AUD-012", "timestamp": "2026-10-21T10:18:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "note_added", "summary": "Added confidential note NOTE-004."},
+    {"id": "AUD-013", "timestamp": "2026-10-24T09:00:00+05:30", "actor_role": "employee", "actor_name": "Sarah Chen", "event_type": "submitted_for_review", "summary": "Submitted six knowledge sections for manager review."},
+    {"id": "AUD-014", "timestamp": "2026-10-24T09:12:00+05:30", "actor_role": "successor", "actor_name": "Marcus Reed", "event_type": "access_requested", "summary": "Requested write access to the handover workspace."},
+    {"id": "AUD-015", "timestamp": "2026-10-24T09:15:00+05:30", "actor_role": "system", "actor_name": "Baton System", "event_type": "manager_notified", "summary": "Created three manager notifications for review and access follow-up."}
+  ],
+  "business_facts": {"access_token_lifetime_minutes": 15, "incident_date": "2026-03-14", "incident_duration_minutes": 38, "default_public_api_limit_requests_per_second": 50, "frontline_goodwill_refund_limit_inr": 500000, "unwritten_rules": ["When the alert is noisy but customer impact is unclear, check the support queue before paging the on-call engineer.", "The daily reconciliation export is generated after 18:30 IST because the upstream ledger closes at 18:00 IST.", "If the deploy dashboard and service dashboard disagree, trust the service dashboard for customer impact until telemetry catches up."]},
+  "counts": {"current_documents": 13, "normal_documents": 9, "confidential_documents": 4, "historical_versions": 2, "total_physical_documents": 15, "folders": 7, "findings": 16, "knowledge_sections": 6, "questions": 8, "answered_questions": 3, "employee_notes": 4, "confidential_employee_notes": 1, "pending_review_sections": 6, "pending_access_requests": 1, "manager_notifications": 3, "audit_entries": 15}
+}

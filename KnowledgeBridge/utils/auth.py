@@ -120,3 +120,21 @@ def logout(session_state):
         session_state.pop(k, None)
     session_state["authenticated"] = False
 
+
+def authenticate_demo(username: str) -> Tuple[bool, str, Optional[Dict[str, str]]]:
+    """Authenticate a predefined demo account without requiring a password.
+
+    Restricted strictly to predefined synthetic accounts (manager, sarah, marcus).
+    Does not bypass authentication for real users.
+    """
+    clean_user = (username or "").strip().lower()
+    if clean_user in ("manager", "sarah", "marcus") and clean_user in ACCOUNTS:
+        record_successful_login()
+        user_record = ACCOUNTS[clean_user]
+        return True, "Demo login successful", {
+            "username": user_record["username"],
+            "name": user_record["name"],
+            "role": user_record["role"],
+        }
+    return False, "Unauthorized demo account access.", None
+

@@ -1,0 +1,14 @@
+HARBORLINE RELEASE CHECKLIST
+Document ID: DOC-REL-006
+Owner: Release Engineering
+Classification: Internal
+Version: 1.3
+
+PRE-DEPLOYMENT
+- Confirm the release candidate and change list.
+- Confirm automated checks are green.
+- Record the rollback command and owner.
+
+DEPLOYMENT CONTROL
+Deployments are paused during an active Severity 1 incident.
+The release owner must record the rollback command before requesting production approval.

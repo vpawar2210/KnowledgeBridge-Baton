@@ -170,7 +170,7 @@ def get_allowed_pages(state: Dict[str, Any], member: Dict[str, Any]) -> List[str
         pages = []
         if can_write(member, is_confidential=False, state=state):
             pages.extend(["connect", "employee", "employee_notes"])
-        pages.extend(["successor_handover", "my_access", "notifications"])
+        pages.extend(["successor_handover", "successor_notes", "my_access", "notifications"])
         if can_read(member, is_confidential=True, state=state):
             pages.append("confidential")
 

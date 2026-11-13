@@ -15,7 +15,7 @@ from pathlib import Path
 import streamlit as st
 from PIL import Image as _PILImage
 
-from utils.auth import authenticate, logout, is_locked, get_lockout_remaining
+from utils.auth import authenticate, logout, is_locked, get_lockout_remaining, authenticate_demo
 from utils.store import (
     load_into_session,
     save_project_state,
@@ -47,6 +47,12 @@ from utils.access import (
     set_grants,
     record_write,
 )
+from utils.demo_seed import (
+    hydrate_demo_session_state,
+    ensure_demo_database_seeded,
+    load_completed_handover,
+    reset_demo_data,
+)
 
 # ─── Page config (must be first Streamlit call) ───────────────────────────────
 _app_icon = _PILImage.open(Path(__file__).resolve().parent / "assets" / "icon.png")
@@ -60,36 +66,36 @@ st.set_page_config(
 # ─── PALETTE & THEME ──────────────────────────────────────────────────────────
 THEMES = {
     "light": {
-        "bg": "#F3F4F6",
-        "sidebar": "#FFFFFF",
-        "card": "#FFFFFF",
-        "surface": "#FFFFFF",
-        "subtle": "#F9FAFB",
-        "input_bg": "#FFFFFF",
-        "input_border": "#6B7280",
-        "border": "#AEB6C2",
-        "text": "#000000",
-        "text2": "#000000",
-        "placeholder": "#4B5563",
-        "disabled": "#1F2937",
-        "primary": "#5B21B6",
-        "primary_hover": "#4C1D95",
-        "on_primary": "#FFFFFF",
-        "secondary_bg": "#FFFFFF",
-        "secondary_border": "#6B7280",
-        "secondary_text": "#000000",
-        "sidebar_active_bg": "#E9DDFB",
-        "sidebar_active_border": "#5B21B6",
-        "sidebar_active_text": "#000000",
-        "sidebar_hover_bg": "#F0E8FD",
-        "sidebar_hover_text": "#000000",
-        "toggle_bg": "#FFFFFF",
-        "toggle_border": "#6B7280",
-        "toggle_text": "#000000",
-        "draft_bg": "#E29A2B",
-        "draft_text": "#FFFFFF",
-        "ready_bg": "#5B21B6",
-        "ready_text": "#FFFFFF",
+        "bg": "#F2E8DA",
+        "sidebar": "#F2E8DA",
+        "card": "#F2E8DA",
+        "surface": "#F2E8DA",
+        "subtle": "#E8DEC8",
+        "input_bg": "#F2E8DA",
+        "input_border": "rgba(59, 36, 24, 0.25)",
+        "border": "rgba(59, 36, 24, 0.15)",
+        "text": "#3B2418",
+        "text2": "rgba(59, 36, 24, 0.70)",
+        "placeholder": "rgba(59, 36, 24, 0.45)",
+        "disabled": "rgba(59, 36, 24, 0.35)",
+        "primary": "#8EC5FF",
+        "primary_hover": "#74B4F5",
+        "on_primary": "#3B2418",
+        "secondary_bg": "#F2E8DA",
+        "secondary_border": "rgba(59, 36, 24, 0.25)",
+        "secondary_text": "#3B2418",
+        "sidebar_active_bg": "#8EC5FF",
+        "sidebar_active_border": "#3B2418",
+        "sidebar_active_text": "#3B2418",
+        "sidebar_hover_bg": "#E8DEC8",
+        "sidebar_hover_text": "#3B2418",
+        "toggle_bg": "#F2E8DA",
+        "toggle_border": "rgba(59, 36, 24, 0.25)",
+        "toggle_text": "#3B2418",
+        "draft_bg": "#E8DEC8",
+        "draft_text": "#3B2418",
+        "ready_bg": "#8EC5FF",
+        "ready_text": "#3B2418",
         "success": "#2E7D32",
         "danger": "#9B1C1C",
     },
@@ -186,6 +192,7 @@ def init_session_state():
         "members": [],
         "grants": {},
         "confidential_files": [],
+        "successor_notes": [],
         "toasted_ids": set(),
         "theme_mode": _theme_mode,
     }
@@ -194,7 +201,10 @@ def init_session_state():
             st.session_state[key] = val
 
 init_session_state()
+ensure_demo_database_seeded()
 load_into_session(st.session_state)
+if st.session_state.get("auth_role") == "Employee" and st.session_state.get("auth_name") and not st.session_state.get("employee_name"):
+    st.session_state.employee_name = st.session_state.auth_name
 
 # ── Resolve Gemini API key from st.secrets / environment (never displayed) ───
 if not st.session_state.api_key:
@@ -305,6 +315,13 @@ def redact_sensitive_info(text: str) -> str:
 # ─── THEME STYLING & TOGGLE ───────────────────────────────────────────────────
 def inject_theme_css(mode: str) -> None:
     t = THEMES[mode]
+    auth_sidebar_css = ""
+    if not st.session_state.get("authenticated"):
+        auth_sidebar_css = """
+section[data-testid="stSidebar"], [data-testid="stSidebar"], [data-testid="stExpandSidebarButton"] {
+    display: none !important;
+}
+"""
     css = textwrap.dedent(f"""<style>
 :root {{
 --bg: {t['bg']};
@@ -348,10 +365,62 @@ def inject_theme_css(mode: str) -> None:
 --nav-active: {t['sidebar_active_bg']};
 --nav-hover-text: {t['sidebar_hover_text']};
 --link: {t['primary']};
+--warning: {t['draft_bg']};
+--warning-bg: {t['subtle']};
+--error: {t['danger']};
+--surface-2: {t['subtle']};
+--radius: 6px;
 }}
 [data-testid="stToolbar"], [data-testid="stDeployButton"], .stDeployButton, [data-testid="stDecoration"], [data-testid="stStatusWidget"] {{ display: none !important; }}
-header[data-testid="stHeader"], header[data-testid="stAppHeader"] {{ background: transparent !important; height: 0 !important; min-height: 0 !important; pointer-events: none !important; }}
-[data-testid="stSidebarCollapseButton"] {{ pointer-events: auto !important; }}
+header[data-testid="stHeader"], header[data-testid="stAppHeader"] {{ background: transparent !important; }}
+[data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapseButton"], [data-testid="collapsedControl"] {{
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    position: fixed !important;
+    top: 0.6rem !important;
+    left: 0.75rem !important;
+    z-index: 1000000 !important;
+    width: 40px !important;
+    height: 40px !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
+    background-color: var(--toggle-bg) !important;
+    border: 1px solid var(--toggle-border) !important;
+    border-radius: 8px !important;
+    align-items: center !important;
+    justify-content: center !important;
+    color: var(--toggle-text) !important;
+    cursor: pointer !important;
+    pointer-events: auto !important;
+    box-shadow: none !important;
+}}
+[data-testid="stExpandSidebarButton"]:hover, [data-testid="stSidebarCollapseButton"]:hover, [data-testid="collapsedControl"]:hover {{
+    border-color: var(--primary) !important;
+}}
+[data-testid="stExpandSidebarButton"] *, [data-testid="stSidebarCollapseButton"] *, [data-testid="collapsedControl"] * {{
+    color: var(--toggle-text) !important;
+}}
+@media (min-width: 768px) {{
+    section[data-testid="stSidebar"], [data-testid="stSidebar"] {{
+        transform: none !important;
+        margin-left: 0 !important;
+        min-width: 260px !important;
+        max-width: 300px !important;
+        width: 280px !important;
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        position: relative !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] {{
+        display: none !important;
+    }}
+    [data-testid="stExpandSidebarButton"] {{
+        display: none !important;
+    }}
+}}
+{auth_sidebar_css}
 .main .block-container {{ max-width: 1100px; padding-top: 4.5rem !important; padding-left: 24px; padding-right: 24px; padding-bottom: 48px; margin: 0 auto; }}
 html, body, [data-testid="stAppViewContainer"], .main, .stApp {{ font-family: 'Inter', BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: var(--bg) !important; color: var(--text) !important; }}
 body, p, span, div, li {{ font-size: 15px; color: var(--text); }}
@@ -399,32 +468,33 @@ button:disabled p, button:disabled span {{ color: var(--disabled) !important; }}
 [data-testid="stTabs"] [role="tablist"] {{ gap: 24px; border-bottom: 1px solid var(--border) !important; }}
 button[data-baseweb="tab"] {{ padding-top: 8px; padding-bottom: 8px; color: var(--text) !important; }}
 button[data-baseweb="tab"] p, button[data-baseweb="tab"] span {{ color: var(--text) !important; font-weight: 500; }}
-button[data-baseweb="tab"][aria-selected="true"] {{ color: var(--primary) !important; border-bottom: 2px solid var(--primary) !important; }}
-button[data-baseweb="tab"][aria-selected="true"] p, button[data-baseweb="tab"][aria-selected="true"] span {{ color: var(--primary) !important; font-weight: 600; }}
+button[data-baseweb="tab"][aria-selected="true"] {{ color: var(--text) !important; border-bottom: 2px solid var(--primary) !important; }}
+button[data-baseweb="tab"][aria-selected="true"] p, button[data-baseweb="tab"][aria-selected="true"] span {{ color: var(--text) !important; font-weight: 600; }}
 div[data-baseweb="tab-highlight"] {{ background-color: var(--primary) !important; }}
 table, [data-testid="stTable"] table {{ width: 100%; border-collapse: collapse !important; border: 1px solid var(--border) !important; background-color: var(--card) !important; }}
 th, td, [data-testid="stTable"] th, [data-testid="stTable"] td {{ border: 1px solid var(--border) !important; color: var(--text) !important; padding: 8px 12px; font-size: 14px; }}
 th, [data-testid="stTable"] th {{ background-color: var(--subtle) !important; font-weight: 600 !important; }}
-a {{ color: var(--primary) !important; }}
+a {{ color: var(--text) !important; text-decoration: underline !important; text-decoration-color: var(--primary) !important; }}
+a:hover {{ color: var(--text) !important; text-decoration-color: var(--primary-hover) !important; }}
 .st-key-theme_toggle_btn, div[data-testid="stElementContainer"].st-key-theme_toggle_btn, .st-key-theme_toggle, div[data-testid="stElementContainer"].st-key-theme_toggle {{ position: fixed !important; top: 0.6rem !important; right: 0.75rem !important; left: auto !important; bottom: auto !important; width: 40px !important; height: 40px !important; min-width: 40px !important; min-height: 40px !important; max-width: 40px !important; max-height: 40px !important; z-index: 1000000 !important; margin: 0 !important; padding: 0 !important; display: block !important; }}
 .st-key-theme_toggle_btn .stButton, .st-key-theme_toggle .stButton {{ width: 40px !important; height: 40px !important; min-width: 40px !important; min-height: 40px !important; margin: 0 !important; padding: 0 !important; }}
 .st-key-theme_toggle_btn button, .st-key-theme_toggle button, .main .stButton.st-key-theme_toggle_btn > button, div[data-testid="stButton"].st-key-theme_toggle_btn > button {{ background-color: var(--toggle-bg) !important; border: 1px solid var(--toggle-border) !important; border-radius: 8px !important; width: 40px !important; height: 40px !important; min-width: 40px !important; min-height: 40px !important; max-width: 40px !important; max-height: 40px !important; padding: 0 !important; margin: 0 !important; display: flex !important; align-items: center !important; justify-content: center !important; color: var(--toggle-text) !important; box-shadow: none !important; }}
 .st-key-theme_toggle_btn button p, .st-key-theme_toggle_btn button span, .st-key-theme_toggle button p, .st-key-theme_toggle button span, .main .stButton.st-key-theme_toggle_btn > button p, .main .stButton.st-key-theme_toggle_btn > button span {{ color: var(--toggle-text) !important; font-size: 20px !important; line-height: 1 !important; margin: 0 !important; padding: 0 !important; }}
-.st-key-theme_toggle_btn button:hover, .st-key-theme_toggle button:hover, .main .stButton.st-key-theme_toggle_btn > button:hover {{ border-color: var(--primary) !important; }}
-.st-key-theme_toggle_btn button:hover p, .st-key-theme_toggle_btn button:hover span, .st-key-theme_toggle button:hover p, .st-key-theme_toggle button:hover span, .main .stButton.st-key-theme_toggle_btn > button:hover p, .main .stButton.st-key-theme_toggle_btn > button:hover span {{ color: var(--primary) !important; }}
-.kb-receipt-card {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: 6px; padding: 14px 18px; margin: 14px 0; }}
-.kb-notice-banner {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; color: var(--text); }}
+.st-key-theme_toggle_btn button:hover, .st-key-theme_toggle button:hover, .main .stButton.st-key-theme_toggle_btn > button:hover {{ border-color: var(--primary) !important; background-color: var(--subtle) !important; }}
+.st-key-theme_toggle_btn button:hover p, .st-key-theme_toggle_btn button:hover span, .st-key-theme_toggle button:hover p, .st-key-theme_toggle button:hover span, .main .stButton.st-key-theme_toggle_btn > button:hover p, .main .stButton.st-key-theme_toggle_btn > button:hover span {{ color: var(--text) !important; }}
+.kb-receipt-card {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: 6px; padding: 14px 18px; margin: 14px 0; box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
+.kb-notice-banner {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; color: var(--text); box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
 .kb-pill {{ font-size: 12px; font-weight: 500; border-radius: 999px; padding: 2px 10px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }}
-.kb-pill-draft {{ background: var(--draft-bg); color: var(--draft-text); }}
-.kb-pill-ready {{ background: var(--ready-bg); color: var(--ready-text); }}
-.kb-pill-info {{ background: var(--ready-bg); color: var(--ready-text); }}
-.kb-pill-success {{ background: var(--card); color: var(--success); border: 1px solid var(--border); }}
-.kb-pill-warning {{ background: var(--draft-bg); color: var(--draft-text); }}
+.kb-pill-draft {{ background: var(--draft-bg); color: var(--draft-text); border: 1px solid var(--border); }}
+.kb-pill-ready {{ background: var(--ready-bg); color: var(--ready-text); border: 1px solid var(--border); }}
+.kb-pill-info {{ background: var(--ready-bg); color: var(--ready-text); border: 1px solid var(--border); }}
+.kb-pill-success {{ background: var(--card); color: var(--text); border: 1px solid var(--border); }}
+.kb-pill-warning {{ background: var(--draft-bg); color: var(--draft-text); border: 1px solid var(--border); }}
 .kb-dot-success {{ background: var(--success); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
 .kb-dot-warning {{ background: var(--draft-bg); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
 .kb-dot-info {{ background: var(--primary); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
 .kb-dot-muted {{ background: var(--text2); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
-.kb-top-navbar {{ display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; background: var(--card); }}
+.kb-top-navbar {{ display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; background: var(--card); box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
 .kb-nav-brand {{ display: flex; align-items: center; gap: 8px; }}
 .kb-brand-logo {{ width: 24px; height: 24px; border-radius: 4px; background: var(--subtle); display: flex; align-items: center; justify-content: center; color: var(--text); border: 1px solid var(--border); }}
 .kb-brand-title {{ font-size: 16px; font-weight: 600; color: var(--text); }}
@@ -436,11 +506,31 @@ a {{ color: var(--primary) !important; }}
 .kb-nav-step-item.done {{ color: var(--text); }}
 .kb-step-num {{ display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 3px; font-size: 11px; font-weight: 600; background: var(--subtle); color: var(--text); }}
 .kb-nav-persona {{ display: flex; align-items: center; gap: 6px; background: var(--subtle); border: 1px solid var(--border); padding: 3px 10px; border-radius: 4px; font-size: 13px; color: var(--text); }}
-.kb-avatar-chip {{ width: 18px; height: 18px; border-radius: 3px; background: var(--border); color: var(--text); font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }}
-.kb-plain-table {{ width: 100%; border-collapse: collapse; margin: 10px 0 14px 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card); }}
+.kb-avatar-chip {{ width: 18px; height: 18px; border-radius: 3px; background: var(--subtle); border: 1px solid var(--border); color: var(--text); font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }}
+.kb-plain-table {{ width: 100%; border-collapse: collapse; margin: 10px 0 14px 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card); box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
 .kb-plain-table th {{ background: var(--subtle); color: var(--text); font-weight: 600; font-size: 12px; padding: 9px 13px; text-align: left; border-bottom: 1px solid var(--border); }}
 .kb-plain-table td {{ padding: 9px 13px; border-bottom: 1px solid var(--border); color: var(--text); font-size: 13px; vertical-align: top; background: var(--card); }}
 .kb-plain-table tr:last-child td {{ border-bottom: none; }}
+.kb-panel-hero {{ background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 18px 20px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
+.kb-section-title {{ font-size: 13px; font-weight: 700; color: var(--text); letter-spacing: 0.04em; text-transform: uppercase; margin: 14px 0 8px 0; border-bottom: 1px solid var(--border); padding-bottom: 5px; }}
+.kb-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; color: var(--text); font-size: 14px; box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
+.kb-card-info {{ background: var(--card); border-left: 3px solid var(--primary); }}
+.kb-card-warning {{ background: var(--card); border-left: 3px solid var(--warning); }}
+.kb-card-danger {{ background: var(--card); border-left: 3px solid var(--danger); }}
+.kb-card-success {{ background: var(--card); border-left: 3px solid var(--success); }}
+.kb-dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; vertical-align: middle; margin-right: 4px; }}
+.kb-signout {{ margin-top: 24px; }}
+.kb-status-dot-item {{ display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); background: var(--subtle); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }}
+.kb-summary-row {{ display: flex; align-items: stretch; gap: 0; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 12px 0; margin-bottom: 16px; overflow: hidden; box-shadow: 0 1px 3px rgba(59, 36, 24, 0.08); }}
+.kb-summary-item {{ flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 6px 12px; gap: 2px; }}
+.kb-summary-num {{ font-size: 22px; font-weight: 700; color: var(--text); line-height: 1; }}
+.kb-summary-value {{ font-size: 20px; font-weight: 700; color: var(--text); line-height: 1; }}
+.kb-summary-label {{ font-size: 11px; font-weight: 500; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.04em; }}
+.kb-summary-divider {{ width: 1px; background: var(--border); align-self: stretch; margin: 4px 0; flex-shrink: 0; }}
+.kb-banner-tip {{ background: var(--subtle); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px; color: var(--text); }}
+.kb-approval-progress {{ display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--subtle); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }}
+.kb-approval-progress-label {{ font-size: 13px; font-weight: 600; color: var(--text); }}
+.kb-approval-progress-count {{ font-size: 14px; font-weight: 700; color: var(--text); }}
 </style>""").strip()
     st.markdown(css, unsafe_allow_html=True)
 
@@ -598,6 +688,7 @@ def step_indicator(current_page: str):
     elif role == "Successor":
         pages = [
             ("successor_handover", "1", "Technical handover"),
+            ("successor_notes",    "2", "Joinee notes"),
         ]
     else:  # Manager
         pages = [
@@ -693,6 +784,48 @@ def render_role_status_line(role: str):
     """).strip(), unsafe_allow_html=True)
 
 
+def is_demo_access_enabled() -> bool:
+    """Enable quick demo access unless explicitly disabled for production use."""
+    raw = os.environ.get("BATON_DEMO_ACCESS")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _seed_demo_state_for_user(user: dict) -> None:
+    """Load the Harborline seeded demo worker state for the built-in demo roles."""
+    if user.get("username") not in {"sarah", "manager", "marcus"}:
+        return
+    hydrate_demo_session_state(st.session_state, user)
+
+
+def complete_login(user: dict) -> None:
+    """Apply the existing successful-auth session state used by both normal and demo sign-ins."""
+    st.session_state.authenticated = True
+    st.session_state.auth_username = user["username"]
+    st.session_state.auth_role = user["role"]
+    st.session_state.auth_name = user["name"]
+
+    notice = load_into_session(st.session_state)
+    if notice:
+        st.session_state.state_notice = notice
+
+    if user.get("username") in {"sarah", "manager", "marcus"}:
+        _seed_demo_state_for_user(user)
+    ensure_member(st.session_state, user)
+    log_audit_entry(st.session_state, user["username"], "Login successful")
+
+    if user["role"] == "Employee":
+        st.session_state.employee_name = user["name"]
+
+    if user["role"] == "Manager":
+        st.session_state.page = "review"
+    elif user["role"] == "Employee":
+        st.session_state.page = "employee"
+    elif user["role"] == "Successor":
+        st.session_state.page = "successor_handover"
+
+
 def render_login_page():
     """Renders the login page."""
     col_pad1, col_center, col_pad2 = st.columns([1, 2, 1])
@@ -719,27 +852,44 @@ def render_login_page():
                 if submit_login:
                     ok, msg, user = authenticate(username_input, password_input)
                     if ok and user:
-                        st.session_state.authenticated = True
-                        st.session_state.auth_username = user["username"]
-                        st.session_state.auth_role = user["role"]
-                        st.session_state.auth_name = user["name"]
-                        if user["role"] == "Employee":
-                            st.session_state.employee_name = user["name"]
-                        notice = load_into_session(st.session_state)
-                        if notice:
-                            st.session_state.state_notice = notice
-                        ensure_member(st.session_state, user)
-                        log_audit_entry(st.session_state, user["username"], "Login successful")
-                        if user["role"] == "Manager":
-                            st.session_state.page = "review"
-                        elif user["role"] == "Employee":
-                            st.session_state.page = "employee"
-                        elif user["role"] == "Successor":
-                            st.session_state.page = "successor_handover"
+                        complete_login(user)
                         st.rerun()
                     else:
                         log_audit_entry(st.session_state, (username_input or "").strip() or "anonymous", "Failed login attempt", reason=msg)
                         st.error(msg)
+
+        st.markdown(textwrap.dedent("""
+            <div style="background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-top:16px;font-size:13px;color:var(--text-2);">
+              <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Demo accounts for evaluation (synthetic data)</div>
+              <div style="margin-bottom:3px;"><code style="font-family:monospace;">manager</code> / <code>Manager@123</code> &rarr; Manager</div>
+              <div style="margin-bottom:3px;"><code style="font-family:monospace;">sarah</code> / <code>Sarah@123</code> &rarr; Employee (Sarah Chen)</div>
+              <div><code style="font-family:monospace;">marcus</code> / <code>Marcus@123</code> &rarr; Successor (Marcus Vance)</div>
+            </div>
+        """).strip(), unsafe_allow_html=True)
+
+        with st.container(border=True):
+            st.markdown(textwrap.dedent("""
+                <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:2px;">Quick demo access (1-click)</div>
+                <div style="font-size:12px;color:var(--text-2);margin-bottom:10px;">Select a persona to sign in immediately without typing a password:</div>
+            """).strip(), unsafe_allow_html=True)
+
+            if st.button("Continue as Manager — manager", key="btn_quick_manager", use_container_width=True):
+                ok, msg, user = authenticate_demo("manager")
+                if ok and user:
+                    complete_login(user)
+                    st.rerun()
+
+            if st.button("Continue as Sarah Chen — sarah (Departing employee)", key="btn_quick_sarah", use_container_width=True):
+                ok, msg, user = authenticate_demo("sarah")
+                if ok and user:
+                    complete_login(user)
+                    st.rerun()
+
+            if st.button("Continue as Marcus Vance — marcus (New joinee)", key="btn_quick_marcus", use_container_width=True):
+                ok, msg, user = authenticate_demo("marcus")
+                if ok and user:
+                    complete_login(user)
+                    st.rerun()
 
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -791,6 +941,7 @@ with st.sidebar:
             "review": "Manager review",
             "handover": "Handover package",
             "successor_handover": "Technical handover",
+            "successor_notes": "Joinee notes",
             "audit": "Audit log",
             "my_access": "My access",
             "access_management": "Access management",
@@ -863,7 +1014,7 @@ for notif in st.session_state.get("notifications", []):
 ROLE_PERMISSIONS = {
     "Manager":   ["review", "handover", "audit"],
     "Employee":  ["connect", "reconstruct", "employee", "employee_notes"],
-    "Successor": ["successor_handover"],
+    "Successor": ["successor_handover", "successor_notes"],
 }
 
 _current_member = {
@@ -1742,7 +1893,7 @@ elif st.session_state.page == "review":
                     if emp_ans:
                         st.markdown(f"- **{q_text}**<br>&nbsp;&nbsp;&nbsp;&nbsp;<b>Employee Context:</b> <i>{emp_ans}</i>", unsafe_allow_html=True)
                     else:
-                        st.markdown(f"- **{q_text}** <i>(Unresolved — awaiting response)</i>")
+                        st.markdown(f"- **{q_text}** <i>(Unresolved — awaiting response)</i>", unsafe_allow_html=True)
             elif section_id == "tribal":
                 if section_data:
                     for item in section_data:
@@ -2262,6 +2413,166 @@ elif st.session_state.page == "successor_handover":
         use_container_width=True,
     )
 
+    # ── New Joinee Notes & Transition Journal ──────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="kb-section-title">New joinee notes & transition journal</div>', unsafe_allow_html=True)
+    st.caption("Record your own observations, environment setup notes, open questions, and next actions as you take over the project.")
+
+    with st.expander("Add a new note", expanded=True):
+        col_n1, col_n2 = st.columns([3, 1])
+        with col_n1:
+            note_title = st.text_input("Note title", placeholder="e.g. Verification of payment service mocks", key="succ_h_note_title")
+        with col_n2:
+            note_cat = st.selectbox(
+                "Category",
+                ["Setup & Environment", "Architecture Question", "Operational Tip", "Blocker", "General Note"],
+                key="succ_h_note_cat"
+            )
+        note_content = st.text_area("Note content (Markdown supported)", height=100, placeholder="Document your learnings, setup steps, or questions for the team...", key="succ_h_note_body")
+        if st.button("Save note", type="primary", key="btn_save_succ_h_note"):
+            if not note_title.strip() or not note_content.strip():
+                st.error("Please enter both a title and content for your note.")
+            else:
+                new_note = {
+                    "id": f"NOTE-{int(time.time())}",
+                    "title": note_title.strip(),
+                    "category": note_cat,
+                    "content": note_content.strip(),
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "author": st.session_state.get("auth_name", "Marcus Vance"),
+                }
+                def _append_note(d):
+                    d.setdefault("successor_notes", []).append(new_note)
+                modify_project_state(_append_note, session_state=st.session_state)
+                log_audit_entry(st.session_state, st.session_state.get("auth_username", "marcus"), f"Added joinee note: {note_title.strip()}")
+                st.success("Note saved successfully!")
+                st.rerun()
+
+    succ_notes = st.session_state.get("successor_notes", [])
+    if succ_notes:
+        st.markdown("<br>", unsafe_allow_html=True)
+        for n_idx, note in enumerate(reversed(succ_notes)):
+            cat = note.get("category", "General Note")
+            pill_class = "kb-pill-info" if "Question" in cat else ("kb-pill-warning" if "Blocker" in cat else "kb-pill-success")
+            st.markdown(textwrap.dedent(f"""
+            <div class="kb-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                    <span class="kb-pill {pill_class}">{cat}</span>
+                    <span style="font-size:12px; color:var(--text-2); font-family:monospace;">{note.get('created_at', '')}</span>
+                </div>
+                <div style="font-size:15px; font-weight:600; color:var(--text); margin-bottom:4px;">{note.get('title', '')}</div>
+                <div style="font-size:14px; color:var(--text); line-height:1.5;">{note.get('content', '')}</div>
+                <div style="font-size:12px; color:var(--text-2); margin-top:6px;">Author: {note.get('author', 'Marcus Vance')}</div>
+            </div>
+            """).strip(), unsafe_allow_html=True)
+            col_del, _ = st.columns([1, 4])
+            with col_del:
+                if st.button("Delete note", key=f"del_h_note_{note.get('id', n_idx)}"):
+                    def _remove_note(d):
+                        d["successor_notes"] = [x for x in d.get("successor_notes", []) if x.get("id") != note.get("id")]
+                    modify_project_state(_remove_note, session_state=st.session_state)
+                    log_audit_entry(st.session_state, st.session_state.get("auth_username", "marcus"), f"Deleted joinee note: {note.get('title', '')}")
+                    st.rerun()
+
+        notes_md = "# Transition Notes & Journal — Marcus Vance\n\n"
+        for n in succ_notes:
+            notes_md += f"## [{n.get('category')}] {n.get('title')}\n*Created: {n.get('created_at')} by {n.get('author')}*\n\n{n.get('content')}\n\n---\n\n"
+        st.download_button(
+            label="Download joinee notes (Markdown)",
+            data=notes_md,
+            file_name="marcus_vance_joinee_notes.md",
+            mime="text/markdown",
+            key="btn_dl_succ_h_notes"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 7B: JOINEE NOTES (Successor role only)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "successor_notes":
+    require_page_access("successor_notes")
+    step_indicator("successor_notes")
+    render_role_status_line("Successor")
+
+    st.markdown(textwrap.dedent("""
+    <div class="kb-panel-hero">
+        <h2 style="font-size:1.25rem; font-weight:700; color:var(--text); margin:0 0 4px 0;">New joinee notes & transition journal</h2>
+        <div style="color:var(--text-2); font-size:0.875rem;">
+            Document your own observations, setup progress, architecture questions, and operational findings as you ramp up.
+        </div>
+    </div>
+    """).strip(), unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown('<div class="kb-section-title">Add a new transition note</div>', unsafe_allow_html=True)
+        col_n1, col_n2 = st.columns([3, 1])
+        with col_n1:
+            note_title = st.text_input("Note title", placeholder="e.g. Local docker setup on Windows", key="page_note_title")
+        with col_n2:
+            note_cat = st.selectbox(
+                "Category",
+                ["Setup & Environment", "Architecture Question", "Operational Tip", "Blocker", "General Note"],
+                key="page_note_cat"
+            )
+        note_content = st.text_area("Note content (Markdown supported)", height=120, placeholder="Document your learnings, setup steps, or questions for the team...", key="page_note_body")
+        if st.button("Save note", type="primary", key="btn_save_page_note"):
+            if not note_title.strip() or not note_content.strip():
+                st.error("Please enter both a title and content for your note.")
+            else:
+                new_note = {
+                    "id": f"NOTE-{int(time.time())}",
+                    "title": note_title.strip(),
+                    "category": note_cat,
+                    "content": note_content.strip(),
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "author": st.session_state.get("auth_name", "Marcus Vance"),
+                }
+                def _append_note(d):
+                    d.setdefault("successor_notes", []).append(new_note)
+                modify_project_state(_append_note, session_state=st.session_state)
+                log_audit_entry(st.session_state, st.session_state.get("auth_username", "marcus"), f"Added joinee note: {note_title.strip()}")
+                st.success("Note saved successfully!")
+                st.rerun()
+
+    notes = st.session_state.get("successor_notes", [])
+    if not notes:
+        st.info("No personal notes recorded yet. Use the form above to add your first note.")
+    else:
+        st.markdown('<div class="kb-section-title">Saved transition notes</div>', unsafe_allow_html=True)
+        for n_idx, note in enumerate(reversed(notes)):
+            cat = note.get("category", "General Note")
+            pill_class = "kb-pill-info" if "Question" in cat else ("kb-pill-warning" if "Blocker" in cat else "kb-pill-success")
+            st.markdown(textwrap.dedent(f"""
+            <div class="kb-card">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                    <span class="kb-pill {pill_class}">{cat}</span>
+                    <span style="font-size:12px; color:var(--text-2); font-family:monospace;">{note.get('created_at', '')}</span>
+                </div>
+                <div style="font-size:15px; font-weight:600; color:var(--text); margin-bottom:4px;">{note.get('title', '')}</div>
+                <div style="font-size:14px; color:var(--text); line-height:1.5;">{note.get('content', '')}</div>
+                <div style="font-size:12px; color:var(--text-2); margin-top:6px;">Author: {note.get('author', 'Marcus Vance')}</div>
+            </div>
+            """).strip(), unsafe_allow_html=True)
+            col_del, _ = st.columns([1, 4])
+            with col_del:
+                if st.button("Delete note", key=f"del_page_note_{note.get('id', n_idx)}"):
+                    def _remove_note(d):
+                        d["successor_notes"] = [x for x in d.get("successor_notes", []) if x.get("id") != note.get("id")]
+                    modify_project_state(_remove_note, session_state=st.session_state)
+                    log_audit_entry(st.session_state, st.session_state.get("auth_username", "marcus"), f"Deleted joinee note: {note.get('title', '')}")
+                    st.rerun()
+
+        notes_md = "# Transition Notes & Journal — Marcus Vance\n\n"
+        for n in notes:
+            notes_md += f"## [{n.get('category')}] {n.get('title')}\n*Created: {n.get('created_at')} by {n.get('author')}*\n\n{n.get('content')}\n\n---\n\n"
+        st.download_button(
+            label="Download all notes (Markdown)",
+            data=notes_md,
+            file_name="marcus_vance_joinee_notes.md",
+            mime="text/markdown",
+            key="btn_dl_all_page_notes"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE 8: AUDIT LOG (Manager only)
@@ -2333,6 +2644,52 @@ elif st.session_state.page == "audit":
             mime="text/csv",
             use_container_width=False,
         )
+
+    # ── Demo controls (Manager only) ──────────────────────────────────────────
+    if st.session_state.get("auth_role") == "Manager":
+        st.markdown("---")
+        st.markdown(
+            '<div class="kb-section-title">Demo controls</div>',
+            unsafe_allow_html=True,
+        )
+        col_demo1, col_demo2 = st.columns(2)
+        with col_demo1:
+            if st.button(
+                "Load completed handover",
+                key="btn_load_completed",
+                use_container_width=True,
+            ):
+                load_completed_handover()
+                load_into_session(st.session_state)
+                log_audit_entry(
+                    st.session_state,
+                    st.session_state.get("auth_username", "manager"),
+                    "Demo: loaded completed handover state",
+                )
+                st.success(
+                    "Completed handover loaded. Marcus can now view and acknowledge his dossier."
+                )
+                st.rerun()
+        with col_demo2:
+            confirm_reset = st.checkbox(
+                "Confirm reset — this wipes all handover progress",
+                key="chk_confirm_reset",
+            )
+            if st.button(
+                "Reset demo data",
+                key="btn_reset_demo",
+                disabled=not confirm_reset,
+                use_container_width=True,
+            ):
+                reset_demo_data()
+                load_into_session(st.session_state)
+                log_audit_entry(
+                    st.session_state,
+                    st.session_state.get("auth_username", "manager"),
+                    "Demo: reset to start state",
+                )
+                st.success("Demo data reset to start state.")
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2587,15 +2944,25 @@ elif st.session_state.page == "confidential":
                         # Files stored after this fix have content=None (bytes stored separately).
                         _cf_content = cf.get("content")
                         if _cf_content is None:
-                            # New storage: bytes not in db, need re-upload
-                            st.info("File content not available in this session. Re-upload to enable preview.")
-                        elif isinstance(_cf_content, (bytes, bytearray)):
+                            _doc_id = cf.get("id", "")
+                            _uploads_dir = Path(__file__).resolve().parent / "data" / "uploads"
+                            if not _uploads_dir.exists():
+                                _uploads_dir = Path("data/uploads")
+                            if _uploads_dir.exists() and _doc_id:
+                                _matches = list(_uploads_dir.glob(f"seed_{_doc_id}_*")) + list(_uploads_dir.glob(f"*{_doc_id}*"))
+                                if _matches:
+                                    try:
+                                        _cf_content = _matches[0].read_bytes()
+                                    except Exception:
+                                        _cf_content = None
+
+                        if isinstance(_cf_content, (bytes, bytearray)):
                             render_file_preview(
                                 _cf_name, bytes(_cf_content),
                                 key_prefix=f"cf_{_cf_idx}",
                                 can_download=True,
                             )
-                        else:
+                        elif _cf_content is not None:
                             # Legacy: content was stored as a decoded string
                             _legacy_bytes = _cf_content.encode("utf-8", errors="replace")
                             if _legacy_bytes[:4] == b"%PDF" or _cf_name.lower().endswith(".pdf"):
@@ -2609,6 +2976,8 @@ elif st.session_state.page == "confidential":
                                     label_visibility="collapsed",
                                     key=f"cf_{_cf_idx}_preview",
                                 )
+                        else:
+                            st.info("File content not available in this session. Re-upload to enable preview.")
 
     if can_write(cur_user, is_confidential=True, state=st.session_state):
         st.subheader("Upload confidential file")

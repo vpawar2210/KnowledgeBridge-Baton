@@ -1,0 +1,4 @@
+rule_id,request_type,minimum_amount_exclusive,maximum_amount_inclusive,currency,approver,condition
+REF-001,Goodwill refund,0,500000,INR,Frontline agent,Eligibility checks required
+REF-002,Goodwill refund,500000.01,No fixed cap,INR,Finance Director,Finance Director approval required
+REF-003,Suspected fraud,Any amount,Any amount,INR,Fraud specialist,Refer regardless of value

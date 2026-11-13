@@ -39,6 +39,7 @@ _KV_KEYS = [
     "all_sources",
     "analyses_run",
     "handovers_run",
+    "successor_notes",
 ]
 
 # Full list that load_into_session / save_project_state understand
@@ -383,10 +384,21 @@ def _read_confidential_files(con: sqlite3.Connection) -> List[Dict[str, Any]]:
         "SELECT id,name,size_bytes as size,uploaded_by,uploaded_at FROM confidential_meta ORDER BY uploaded_at"
     ).fetchall()
     result = []
+    uploads_dir = Path(__file__).resolve().parent.parent / "data" / "uploads"
+    if not uploads_dir.exists():
+        uploads_dir = Path("data/uploads")
     for r in rows:
         d = dict(r)
-        # content not stored in db — will be decrypted on demand
-        d["content"] = None
+        doc_id = d.get("id", "")
+        content = None
+        if uploads_dir.exists() and doc_id:
+            matches = list(uploads_dir.glob(f"seed_{doc_id}_*")) + list(uploads_dir.glob(f"*{doc_id}*"))
+            if matches:
+                try:
+                    content = matches[0].read_bytes()
+                except Exception:
+                    content = None
+        d["content"] = content
         result.append(d)
     return result
 
@@ -434,6 +446,7 @@ def get_empty_state() -> Dict[str, Any]:
         "members": [],
         "grants": {},
         "confidential_files": [],
+        "successor_notes": [],
     }
 
 

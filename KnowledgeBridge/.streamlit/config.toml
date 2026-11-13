@@ -1,9 +1,9 @@
 [theme.light]
-primaryColor = "#5B21B6"
-backgroundColor = "#F3F4F6"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#000000"
-borderColor = "#AEB6C2"
+primaryColor = "#8EC5FF"
+backgroundColor = "#F2E8DA"
+secondaryBackgroundColor = "#F2E8DA"
+textColor = "#3B2418"
+borderColor = "#D7CBBD"
 
 [theme.dark]
 primaryColor = "#7C3AED"

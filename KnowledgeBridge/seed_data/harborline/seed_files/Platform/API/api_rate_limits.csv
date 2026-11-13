@@ -1,0 +1,4 @@
+rule_id,route_or_event,limit_value,limit_unit,throttle_response,retry_or_response_header,notes
+API-001,GET /v1/knowledge,50,requests per second per client key,HTTP 429,Retry-After header,Default public API limit
+API-002,POST /v1/reconstruct,10,requests per minute per user,HTTP 429,Retry-After header,Long-running reconstruction endpoint
+WEBHOOK-001,Outbound webhook delivery,3,retry attempts,n/a,exponential backoff,Retries stop after the third failed attempt

@@ -1,0 +1,11 @@
+HARBORLINE BUSINESS CONTINUITY CONTACT ROUTING
+Document ID: DOC-BCP-010
+Owner: Business Continuity Office
+Classification: Confidential
+Version: 1.0
+
+ESCALATION ORDER
+1. Notify the Incident Commander for a Severity 1 event.
+2. Notify Platform On-call for service restoration activity.
+3. Notify Customer Operations when customer communication is required.
+4. Notify Finance Escalation for a refund approval exception.
