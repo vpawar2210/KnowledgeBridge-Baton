@@ -13,6 +13,7 @@ import textwrap
 import time
 from pathlib import Path
 import streamlit as st
+from PIL import Image as _PILImage
 
 from utils.auth import authenticate, logout, is_locked, get_lockout_remaining
 from utils.store import (
@@ -20,16 +21,133 @@ from utils.store import (
     save_project_state,
     log_audit_entry,
     load_project_state,
-    get_empty_state
+    get_empty_state,
+    modify_project_state,
+    mark_notifications_read,
+    register_confidential_meta,
+)
+from utils.file_processor import get_preview
+from utils.access import (
+    REQUEST_LABELS,
+    ROLE_LABELS,
+    get_role_label,
+    get_manager_id,
+    get_employee_id,
+    get_successor_id,
+    ensure_member,
+    get_member_grants,
+    can_read,
+    can_write,
+    get_effective_access,
+    get_allowed_pages,
+    require_page_access,
+    add_notification,
+    create_request,
+    decide_request,
+    set_grants,
+    record_write,
 )
 
 # ─── Page config (must be first Streamlit call) ───────────────────────────────
+_app_icon = _PILImage.open(Path(__file__).resolve().parent / "assets" / "icon.png")
 st.set_page_config(
     page_title="Baton — Knowledge Handover Platform",
-    page_icon=":material/swap_horiz:",
+    page_icon=_app_icon,
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ─── PALETTE & THEME ──────────────────────────────────────────────────────────
+THEMES = {
+    "light": {
+        "bg": "#F3F4F6",
+        "sidebar": "#FFFFFF",
+        "card": "#FFFFFF",
+        "surface": "#FFFFFF",
+        "subtle": "#F9FAFB",
+        "input_bg": "#FFFFFF",
+        "input_border": "#6B7280",
+        "border": "#AEB6C2",
+        "text": "#000000",
+        "text2": "#000000",
+        "placeholder": "#4B5563",
+        "disabled": "#1F2937",
+        "primary": "#5B21B6",
+        "primary_hover": "#4C1D95",
+        "on_primary": "#FFFFFF",
+        "secondary_bg": "#FFFFFF",
+        "secondary_border": "#6B7280",
+        "secondary_text": "#000000",
+        "sidebar_active_bg": "#E9DDFB",
+        "sidebar_active_border": "#5B21B6",
+        "sidebar_active_text": "#000000",
+        "sidebar_hover_bg": "#F0E8FD",
+        "sidebar_hover_text": "#000000",
+        "toggle_bg": "#FFFFFF",
+        "toggle_border": "#6B7280",
+        "toggle_text": "#000000",
+        "draft_bg": "#E29A2B",
+        "draft_text": "#FFFFFF",
+        "ready_bg": "#5B21B6",
+        "ready_text": "#FFFFFF",
+        "success": "#2E7D32",
+        "danger": "#9B1C1C",
+    },
+    "dark": {
+        "bg": "#0F1420",
+        "sidebar": "#0B0F19",
+        "card": "#171E2E",
+        "surface": "#171E2E",
+        "subtle": "#171E2E",
+        "input_bg": "#171E2E",
+        "input_border": "#5A6A85",
+        "border": "#5A6A85",
+        "text": "#F8FAFC",
+        "text2": "#CBD5E1",
+        "placeholder": "#64748B",
+        "disabled": "#64748B",
+        "primary": "#7C3AED",
+        "primary_hover": "#6D28D9",
+        "on_primary": "#FFFFFF",
+        "secondary_bg": "#171E2E",
+        "secondary_border": "#5A6A85",
+        "secondary_text": "#F8FAFC",
+        "sidebar_active_bg": "#3B2A73",
+        "sidebar_active_border": "#7C3AED",
+        "sidebar_active_text": "#F8FAFC",
+        "sidebar_hover_bg": "#241E47",
+        "sidebar_hover_text": "#F8FAFC",
+        "toggle_bg": "#171E2E",
+        "toggle_border": "#5A6A85",
+        "toggle_text": "#F8FAFC",
+        "draft_bg": "#F5DEB3",
+        "draft_text": "#7A4B00",
+        "ready_bg": "#3B2A73",
+        "ready_text": "#F8FAFC",
+        "success": "#6FBF73",
+        "danger": "#E57373",
+    },
+}
+
+THEME_ICONS = {
+    "light": ":material/light_mode:",
+    "dark": ":material/dark_mode:",
+}
+
+
+def get_theme_mode() -> str:
+    if "theme_mode" in st.session_state and st.session_state.theme_mode in ("light", "dark"):
+        return st.session_state.theme_mode
+    mode = "light"
+    if hasattr(st, "context") and hasattr(st.context, "theme"):
+        ctx_theme = getattr(st.context.theme, "type", None)
+        if ctx_theme and str(ctx_theme).lower() in ("light", "dark"):
+            mode = str(ctx_theme).lower()
+    st.session_state.theme_mode = mode
+    return mode
+
+
+_theme_mode = get_theme_mode()
 
 # ─── SESSION STATE INIT (Early Initialization for Theme & Auth) ───────────────
 def init_session_state():
@@ -63,12 +181,20 @@ def init_session_state():
         "state_notice": None,
         "input_truncated": False,
         "_last_logged_page": "",
+        "notifications": [],
+        "access_requests": [],
+        "members": [],
+        "grants": {},
+        "confidential_files": [],
+        "toasted_ids": set(),
+        "theme_mode": _theme_mode,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
 
 init_session_state()
+load_into_session(st.session_state)
 
 # ── Resolve Gemini API key from st.secrets / environment (never displayed) ───
 if not st.session_state.api_key:
@@ -92,6 +218,69 @@ def _safe_err(e: Exception) -> str:
     return msg
 
 
+def render_file_preview(file_name: str, data: bytes, key_prefix: str,
+                        can_download: bool = True) -> None:
+    """
+    Render a file preview using get_preview() from utils/file_processor.
+    Plain Streamlit components only. No raw bytes ever shown as text.
+    If the stored bytes look wrong (empty or PDF bytes stored as decoded text),
+    show a warning instead of garbage.
+    """
+    # Guard: empty or corrupt stored data
+    if not data:
+        st.warning("This file was stored incorrectly. Please upload it again.")
+        return
+
+    # Detect PDF bytes stored as a decoded string (old bug): if the data
+    # starts with b'%PDF' it is real bytes; if it starts with the text literal
+    # '%PDF' encoded as UTF-8 it was double-decoded.  Either way get_preview
+    # handles it, but we surface the warning for files that were saved as plain
+    # decoded text before this fix (they will have no pdfplumber-readable pages).
+    result = get_preview(file_name, data)
+
+    kind = result["kind"]
+    text = result.get("text", "")
+    pages = result.get("pages")
+    truncated = result.get("truncated", False)
+    note = result.get("note", "")
+
+    if kind in ("text", "pdf_text"):
+        if pages:
+            st.caption(f"{pages} page(s)")
+        st.text_area(
+            label="File content",
+            value=text,
+            height=300,
+            disabled=True,
+            label_visibility="collapsed",
+            key=f"{key_prefix}_preview",
+        )
+        if truncated:
+            st.caption("Preview cut at 20,000 characters. Download the file for the full content.")
+    elif kind in ("pdf_no_text", "unsupported"):
+        # Check if data looks like it was stored as decoded text (old bug)
+        try:
+            decoded_check = data[:8].decode("ascii", errors="replace")
+        except Exception:
+            decoded_check = ""
+        if decoded_check.startswith("%PDF") or b"%PDF" in data[:16]:
+            # real PDF bytes but no text layer, or extraction failed
+            st.info(note if note else "This PDF could not be read.")
+        elif b"%PDF" not in data[:16] and file_name.lower().endswith(".pdf"):
+            # bytes don't look like a PDF — probably stored as decoded text
+            st.warning("This file was stored incorrectly. Please upload it again.")
+        else:
+            st.info(note if note else "Preview is not available for this file type. Use Download.")
+
+    if can_download:
+        st.download_button(
+            "Download original file",
+            data=data,
+            file_name=file_name,
+            key=f"{key_prefix}_dl",
+        )
+
+
 def redact_sensitive_info(text: str) -> str:
     """Redact sensitive credentials, emails, and phone numbers without modifying normal prose."""
     if not text:
@@ -113,251 +302,160 @@ def redact_sensitive_info(text: str) -> str:
     return text
 
 
-# ─── GLOBAL DESIGN SYSTEM & THEME ENGINE ──────────────────────────────────────
-# ─── SIDEBAR STYLES (Phase 3: Always near-black in both themes) ───────────────
-st.markdown(textwrap.dedent("""
-<style>
-[data-testid="stSidebar"] { background: #0C0C0E; border-right: 1px solid #27272A; }
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
-[data-testid="stSidebar"] label,
-[data-testid="stSidebar"] span { color: #FAFAFA; }
-[data-testid="stSidebar"] .stButton > button {
-  background: transparent; border: 1px solid transparent; border-radius: 6px;
-  justify-content: flex-start; text-align: left; width: 100%; }
-[data-testid="stSidebar"] .stButton > button p,
-[data-testid="stSidebar"] .stButton > button span { color: #A1A1AA; text-align: left; }
-[data-testid="stSidebar"] .stButton > button:hover { background: #18181B; }
-[data-testid="stSidebar"] .stButton > button:hover p { color: #FAFAFA; }
-[data-testid="stSidebar"] .stButton > button[kind="primary"],
-[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] {
-  background: #1F1F23; border-left: 2px solid #4F46E5; }
-[data-testid="stSidebar"] .stButton > button[kind="primary"] p,
-[data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] p { color: #FAFAFA; }
-[data-testid="stSidebar"] .stButton > button:disabled { opacity: 0.45; }
-[data-testid="stSidebar"] .kb-signout .stButton > button {
-  border: 1px solid #3F3F46; justify-content: center; background: transparent; }
-[data-testid="stSidebar"] .kb-signout .stButton > button p,
-[data-testid="stSidebar"] .kb-signout .stButton > button span {
-  color: #FAFAFA; text-align: center; }
-[data-testid="stSidebar"] .kb-signout .stButton > button:hover {
-  background: #18181B; }
+# ─── THEME STYLING & TOGGLE ───────────────────────────────────────────────────
+def inject_theme_css(mode: str) -> None:
+    t = THEMES[mode]
+    css = textwrap.dedent(f"""<style>
+:root {{
+--bg: {t['bg']};
+--sidebar: {t['sidebar']};
+--card: {t['card']};
+--surface: {t['surface']};
+--subtle: {t['subtle']};
+--input-bg: {t['input_bg']};
+--input-border: {t['input_border']};
+--border: {t['border']};
+--divider: {t['border']};
+--text: {t['text']};
+--text2: {t['text2']};
+--text-2: {t['text2']};
+--muted: {t['text2']};
+--placeholder: {t['placeholder']};
+--disabled: {t['disabled']};
+--primary: {t['primary']};
+--primary-hover: {t['primary_hover']};
+--on-primary: {t['on_primary']};
+--secondary-bg: {t['secondary_bg']};
+--secondary-border: {t['secondary_border']};
+--secondary-text: {t['secondary_text']};
+--sidebar-active-bg: {t['sidebar_active_bg']};
+--sidebar-active-border: {t['sidebar_active_border']};
+--sidebar-active-text: {t['sidebar_active_text']};
+--sidebar-hover-bg: {t['sidebar_hover_bg']};
+--sidebar-hover-text: {t['sidebar_hover_text']};
+--toggle-bg: {t['toggle_bg']};
+--toggle-border: {t['toggle_border']};
+--toggle-text: {t['toggle_text']};
+--draft-bg: {t['draft_bg']};
+--draft-text: {t['draft_text']};
+--ready-bg: {t['ready_bg']};
+--ready-text: {t['ready_text']};
+--success: {t['success']};
+--danger: {t['danger']};
+--accent: {t['primary']};
+--accent-hover: {t['primary_hover']};
+--on-accent: {t['on_primary']};
+--nav-active: {t['sidebar_active_bg']};
+--nav-hover-text: {t['sidebar_hover_text']};
+--link: {t['primary']};
+}}
+[data-testid="stToolbar"], [data-testid="stDeployButton"], .stDeployButton, [data-testid="stDecoration"], [data-testid="stStatusWidget"] {{ display: none !important; }}
+header[data-testid="stHeader"], header[data-testid="stAppHeader"] {{ background: transparent !important; height: 0 !important; min-height: 0 !important; pointer-events: none !important; }}
+[data-testid="stSidebarCollapseButton"] {{ pointer-events: auto !important; }}
+.main .block-container {{ max-width: 1100px; padding-top: 4.5rem !important; padding-left: 24px; padding-right: 24px; padding-bottom: 48px; margin: 0 auto; }}
+html, body, [data-testid="stAppViewContainer"], .main, .stApp {{ font-family: 'Inter', BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: var(--bg) !important; color: var(--text) !important; }}
+body, p, span, div, li {{ font-size: 15px; color: var(--text); }}
+h1, h2, h3, h4, h5, h6 {{ color: var(--text) !important; font-weight: 600; text-align: left; }}
+h1 {{ font-size: 28px; }}
+h2 {{ font-size: 20px; }}
+h3 {{ font-size: 16px; }}
+label, [data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] span {{ font-size: 14px !important; font-weight: 500; color: var(--text) !important; }}
+small, .stCaption, caption, [data-testid="stCaptionContainer"] p {{ font-size: 13px !important; color: var(--text) !important; }}
+input, textarea, select, [data-baseweb="input"], [data-baseweb="textarea"], [data-baseweb="select"] > div {{ background-color: var(--input-bg) !important; border: 1px solid var(--input-border) !important; color: var(--text) !important; border-radius: 6px; }}
+input:focus, textarea:focus, [data-baseweb="input"]:focus-within, [data-baseweb="textarea"]:focus-within, [data-baseweb="select"]:focus-within {{ border-color: var(--primary) !important; }}
+::placeholder, input::placeholder, textarea::placeholder {{ color: var(--placeholder) !important; opacity: 1 !important; }}
+:disabled, [disabled], button:disabled, input:disabled, textarea:disabled, [aria-disabled="true"] {{ color: var(--disabled) !important; opacity: 1 !important; }}
+button:disabled p, button:disabled span {{ color: var(--disabled) !important; }}
+.stButton > button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"], button[data-testid="stFormSubmitButton"] > button {{ background-color: var(--primary) !important; border: 1px solid var(--primary) !important; color: var(--on-primary) !important; border-radius: 8px; }}
+.stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span, button[data-testid="stFormSubmitButton"] > button p, button[data-testid="stFormSubmitButton"] > button span {{ color: var(--on-primary) !important; }}
+.stButton > button[kind="primary"]:hover, button[data-testid="stFormSubmitButton"] > button:hover {{ background-color: var(--primary-hover) !important; border-color: var(--primary-hover) !important; }}
+.main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) {{ background-color: var(--secondary-bg) !important; border: 1px solid var(--secondary-border) !important; color: var(--secondary-text) !important; border-radius: 8px; }}
+.main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) p, .main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) span {{ color: var(--secondary-text) !important; }}
+.main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover {{ border-color: var(--primary) !important; }}
+[data-testid="stSidebar"] {{ background-color: var(--sidebar) !important; border-right: 1px solid var(--border) !important; }}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {{ color: var(--text) !important; }}
+[data-testid="stSidebar"] .stButton > button {{ background: transparent !important; border: 1px solid transparent !important; border-radius: 6px; justify-content: flex-start; text-align: left; width: 100%; }}
+[data-testid="stSidebar"] .stButton > button p, [data-testid="stSidebar"] .stButton > button span {{ color: var(--text) !important; text-align: left; font-weight: 500; }}
+[data-testid="stSidebar"] .stButton > button:hover {{ background-color: var(--sidebar-hover-bg) !important; }}
+[data-testid="stSidebar"] .stButton > button:hover p, [data-testid="stSidebar"] .stButton > button:hover span {{ color: var(--sidebar-hover-text) !important; }}
+[data-testid="stSidebar"] .stButton > button[kind="primary"], [data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] {{ background-color: var(--sidebar-active-bg) !important; border: 1px solid transparent !important; border-left: 3px solid var(--sidebar-active-border) !important; border-radius: 6px; }}
+[data-testid="stSidebar"] .stButton > button[kind="primary"] p, [data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] p, [data-testid="stSidebar"] .stButton > button[kind="primary"] span, [data-testid="stSidebar"] .stButton > button[data-testid="stBaseButton-primary"] span {{ color: var(--sidebar-active-text) !important; font-weight: 700 !important; }}
+[data-testid="stSidebar"] .kb-signout .stButton > button {{ background-color: var(--secondary-bg) !important; border: 1px solid var(--secondary-border) !important; justify-content: center; width: 100%; border-radius: 6px; }}
+[data-testid="stSidebar"] .kb-signout .stButton > button p, [data-testid="stSidebar"] .kb-signout .stButton > button span {{ color: var(--secondary-text) !important; text-align: center; }}
+[data-testid="stSidebar"] .kb-signout .stButton > button:hover {{ border-color: var(--primary) !important; }}
+.kb-status-dot-green {{ width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; }}
+.kb-sidebar-nav-label {{ font-size: 11px; font-weight: 600; color: var(--text) !important; letter-spacing: 0.06em; margin: 12px 0 6px 0; }}
+.kb-sidebar-user-name {{ font-size: 14px; font-weight: 600; color: var(--text) !important; }}
+.kb-sidebar-user-role {{ font-size: 12px; color: var(--text2) !important; }}
+.kb-sidebar-status {{ display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2) !important; margin-bottom: 16px; }}
+.kb-brand-box {{ width: 24px; height: 24px; border-radius: 4px; background: var(--subtle); display: flex; align-items: center; justify-content: center; color: var(--text); border: 1px solid var(--border); }}
+.kb-brand-text-white {{ font-size: 16px; font-weight: 600; color: var(--text) !important; }}
+[data-testid="stVerticalBlockBorderWrapper"], [data-testid="stExpander"], [data-testid="stContainer"][data-border="true"], [data-testid="stForm"] {{ background-color: var(--card) !important; border: 1px solid var(--border) !important; border-radius: 6px; }}
+[data-testid="stExpander"] summary span {{ color: var(--text) !important; font-weight: 600 !important; }}
+[data-testid="stFileUploader"] {{ border: 1px solid var(--input-border) !important; border-radius: 6px !important; background-color: var(--input-bg) !important; }}
+[data-testid="stFileUploader"] * {{ color: var(--text) !important; }}
+[data-testid="stAlert"] {{ border: 1px solid var(--border) !important; border-radius: 6px !important; background-color: var(--card) !important; color: var(--text) !important; }}
+[data-testid="stAlert"] * {{ color: var(--text) !important; }}
+[data-testid="stTabs"] [role="tablist"] {{ gap: 24px; border-bottom: 1px solid var(--border) !important; }}
+button[data-baseweb="tab"] {{ padding-top: 8px; padding-bottom: 8px; color: var(--text) !important; }}
+button[data-baseweb="tab"] p, button[data-baseweb="tab"] span {{ color: var(--text) !important; font-weight: 500; }}
+button[data-baseweb="tab"][aria-selected="true"] {{ color: var(--primary) !important; border-bottom: 2px solid var(--primary) !important; }}
+button[data-baseweb="tab"][aria-selected="true"] p, button[data-baseweb="tab"][aria-selected="true"] span {{ color: var(--primary) !important; font-weight: 600; }}
+div[data-baseweb="tab-highlight"] {{ background-color: var(--primary) !important; }}
+table, [data-testid="stTable"] table {{ width: 100%; border-collapse: collapse !important; border: 1px solid var(--border) !important; background-color: var(--card) !important; }}
+th, td, [data-testid="stTable"] th, [data-testid="stTable"] td {{ border: 1px solid var(--border) !important; color: var(--text) !important; padding: 8px 12px; font-size: 14px; }}
+th, [data-testid="stTable"] th {{ background-color: var(--subtle) !important; font-weight: 600 !important; }}
+a {{ color: var(--primary) !important; }}
+.st-key-theme_toggle_btn, div[data-testid="stElementContainer"].st-key-theme_toggle_btn, .st-key-theme_toggle, div[data-testid="stElementContainer"].st-key-theme_toggle {{ position: fixed !important; top: 0.6rem !important; right: 0.75rem !important; left: auto !important; bottom: auto !important; width: 40px !important; height: 40px !important; min-width: 40px !important; min-height: 40px !important; max-width: 40px !important; max-height: 40px !important; z-index: 1000000 !important; margin: 0 !important; padding: 0 !important; display: block !important; }}
+.st-key-theme_toggle_btn .stButton, .st-key-theme_toggle .stButton {{ width: 40px !important; height: 40px !important; min-width: 40px !important; min-height: 40px !important; margin: 0 !important; padding: 0 !important; }}
+.st-key-theme_toggle_btn button, .st-key-theme_toggle button, .main .stButton.st-key-theme_toggle_btn > button, div[data-testid="stButton"].st-key-theme_toggle_btn > button {{ background-color: var(--toggle-bg) !important; border: 1px solid var(--toggle-border) !important; border-radius: 8px !important; width: 40px !important; height: 40px !important; min-width: 40px !important; min-height: 40px !important; max-width: 40px !important; max-height: 40px !important; padding: 0 !important; margin: 0 !important; display: flex !important; align-items: center !important; justify-content: center !important; color: var(--toggle-text) !important; box-shadow: none !important; }}
+.st-key-theme_toggle_btn button p, .st-key-theme_toggle_btn button span, .st-key-theme_toggle button p, .st-key-theme_toggle button span, .main .stButton.st-key-theme_toggle_btn > button p, .main .stButton.st-key-theme_toggle_btn > button span {{ color: var(--toggle-text) !important; font-size: 20px !important; line-height: 1 !important; margin: 0 !important; padding: 0 !important; }}
+.st-key-theme_toggle_btn button:hover, .st-key-theme_toggle button:hover, .main .stButton.st-key-theme_toggle_btn > button:hover {{ border-color: var(--primary) !important; }}
+.st-key-theme_toggle_btn button:hover p, .st-key-theme_toggle_btn button:hover span, .st-key-theme_toggle button:hover p, .st-key-theme_toggle button:hover span, .main .stButton.st-key-theme_toggle_btn > button:hover p, .main .stButton.st-key-theme_toggle_btn > button:hover span {{ color: var(--primary) !important; }}
+.kb-receipt-card {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--success); border-radius: 6px; padding: 14px 18px; margin: 14px 0; }}
+.kb-notice-banner {{ background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--primary); border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; color: var(--text); }}
+.kb-pill {{ font-size: 12px; font-weight: 500; border-radius: 999px; padding: 2px 10px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }}
+.kb-pill-draft {{ background: var(--draft-bg); color: var(--draft-text); }}
+.kb-pill-ready {{ background: var(--ready-bg); color: var(--ready-text); }}
+.kb-pill-info {{ background: var(--ready-bg); color: var(--ready-text); }}
+.kb-pill-success {{ background: var(--card); color: var(--success); border: 1px solid var(--border); }}
+.kb-pill-warning {{ background: var(--draft-bg); color: var(--draft-text); }}
+.kb-dot-success {{ background: var(--success); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
+.kb-dot-warning {{ background: var(--draft-bg); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
+.kb-dot-info {{ background: var(--primary); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
+.kb-dot-muted {{ background: var(--text2); width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
+.kb-top-navbar {{ display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; background: var(--card); }}
+.kb-nav-brand {{ display: flex; align-items: center; gap: 8px; }}
+.kb-brand-logo {{ width: 24px; height: 24px; border-radius: 4px; background: var(--subtle); display: flex; align-items: center; justify-content: center; color: var(--text); border: 1px solid var(--border); }}
+.kb-brand-title {{ font-size: 16px; font-weight: 600; color: var(--text); }}
+.kb-brand-sub {{ font-size: 12px; color: var(--text2); margin-left: 4px; }}
+.kb-nav-steps {{ display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }}
+.kb-step-connector {{ width: 10px; height: 1px; background: var(--border); }}
+.kb-nav-step-item {{ display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 500; color: var(--text2); padding: 3px 7px; border-radius: 4px; }}
+.kb-nav-step-item.active {{ background: var(--sidebar-active-bg); color: var(--sidebar-active-text); font-weight: 600; border: 1px solid var(--border); }}
+.kb-nav-step-item.done {{ color: var(--text); }}
+.kb-step-num {{ display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 3px; font-size: 11px; font-weight: 600; background: var(--subtle); color: var(--text); }}
+.kb-nav-persona {{ display: flex; align-items: center; gap: 6px; background: var(--subtle); border: 1px solid var(--border); padding: 3px 10px; border-radius: 4px; font-size: 13px; color: var(--text); }}
+.kb-avatar-chip {{ width: 18px; height: 18px; border-radius: 3px; background: var(--border); color: var(--text); font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }}
+.kb-plain-table {{ width: 100%; border-collapse: collapse; margin: 10px 0 14px 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card); }}
+.kb-plain-table th {{ background: var(--subtle); color: var(--text); font-weight: 600; font-size: 12px; padding: 9px 13px; text-align: left; border-bottom: 1px solid var(--border); }}
+.kb-plain-table td {{ padding: 9px 13px; border-bottom: 1px solid var(--border); color: var(--text); font-size: 13px; vertical-align: top; background: var(--card); }}
+.kb-plain-table tr:last-child td {{ border-bottom: none; }}
+</style>""").strip()
+    st.markdown(css, unsafe_allow_html=True)
 
-.kb-status-dot-green {
-  width: 8px; height: 8px; border-radius: 50%; background: #10B981; display: inline-block;
-}
-.kb-sidebar-nav-label {
-  font-size: 11px; font-weight: 600; color: #A1A1AA; letter-spacing: 0.06em; margin: 12px 0 6px 0;
-}
-.kb-sidebar-user-name { font-size: 14px; font-weight: 600; color: #FAFAFA; }
-.kb-sidebar-user-role { font-size: 12px; color: #A1A1AA; }
-.kb-sidebar-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #A1A1AA; margin-bottom: 16px; }
-</style>
-""").strip(), unsafe_allow_html=True)
 
-# ─── MAIN AREA STYLES (Phase 4) ───────────────────────────────────────────────
-st.markdown(textwrap.dedent("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+def render_theme_toggle() -> None:
+    mode = get_theme_mode()
+    icon = THEME_ICONS[mode]
+    help_text = "Switch to dark mode" if mode == "light" else "Switch to light mode"
+    if st.button(icon, key="theme_toggle_btn", help=help_text):
+        st.session_state.theme_mode = "dark" if mode == "light" else "light"
+        st.rerun()
 
-html, body, [data-testid="stAppViewContainer"], .main {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
 
-.main .block-container {
-  max-width: 1100px;
-  padding-top: 3.5rem;
-  padding-left: 24px;
-  padding-right: 24px;
-  padding-bottom: 48px;
-  margin: 0 auto;
-}
-
-h1 { font-size: 28px; font-weight: 600; text-align: left; }
-h2 { font-size: 20px; font-weight: 600; text-align: left; }
-h3 { font-size: 16px; font-weight: 600; text-align: left; }
-p, span, div, li, label { font-size: 14px; text-align: left; }
-small, .stCaption, caption { font-size: 13px; text-align: left; }
-
-.main .stButton > button[kind="primary"],
-.main .stButton > button[data-testid="stBaseButton-primary"] {
-  background: #4F46E5; border: 1px solid #4F46E5; border-radius: 6px;
-}
-.main .stButton > button[kind="primary"] p,
-.main .stButton > button[kind="primary"] span,
-.main .stButton > button[data-testid="stBaseButton-primary"] p,
-.main .stButton > button[data-testid="stBaseButton-primary"] span {
-  color: #FFFFFF;
-}
-.main .stButton > button[kind="primary"]:hover,
-.main .stButton > button[data-testid="stBaseButton-primary"]:hover {
-  background: #4338CA; border-color: #4338CA;
-}
-
-[data-testid="stTabs"] [role="tablist"] { gap: 24px; }
-button[data-baseweb="tab"] { padding-top: 8px; padding-bottom: 8px; }
-
-/* Status pills and custom block rules (Phase 5) */
-.kb-receipt-card {
-  background: var(--subtle); border: 1px solid var(--border);
-  border-left: 3px solid #10B981; border-radius: 6px; padding: 14px 18px; margin: 14px 0;
-}
-.kb-notice-banner {
-  background: var(--surface); border: 1px solid var(--border);
-  border-left: 3px solid #F59E0B; border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; color: var(--text-2);
-}
-.kb-brand-box {
-  width: 24px; height: 24px; border-radius: 4px; background: #1F1F23;
-  display: flex; align-items: center; justify-content: center; color: #FAFAFA;
-}
-.kb-brand-text-white {
-  font-size: 16px; font-weight: 600; color: #FAFAFA;
-}
-
-.kb-pill {
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 999px;
-  padding: 2px 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-.kb-pill-draft {
-  background: var(--subtle);
-  color: var(--muted);
-  border: 1px solid var(--border);
-}
-.kb-pill-info {
-  background: var(--pill-info-bg);
-  color: var(--pill-info-text);
-}
-.kb-pill-success {
-  background: rgba(16, 185, 129, 0.12);
-  color: #10B981;
-}
-.kb-pill-warning {
-  background: rgba(245, 158, 11, 0.12);
-  color: #F59E0B;
-}
-
-.kb-dot-success { background: #10B981; }
-.kb-dot-warning { background: #F59E0B; }
-.kb-dot-info    { background: #4F46E5; }
-.kb-dot-muted   { background: var(--muted); }
-
-.kb-top-navbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 20px;
-  gap: 12px;
-  flex-wrap: wrap;
-  background: var(--surface);
-}
-.kb-nav-brand { display: flex; align-items: center; gap: 8px; }
-.kb-brand-logo {
-  width: 24px; height: 24px; border-radius: 4px; background: var(--subtle);
-  display: flex; align-items: center; justify-content: center; color: var(--text);
-}
-.kb-brand-title { font-size: 16px; font-weight: 600; color: var(--text); }
-.kb-brand-sub { font-size: 12px; color: var(--text-2); margin-left: 4px; }
-.kb-nav-steps { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.kb-step-connector { width: 10px; height: 1px; background: var(--border); }
-.kb-nav-step-item {
-  display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 500;
-  color: var(--muted); padding: 3px 7px; border-radius: 4px;
-}
-.kb-nav-step-item.active {
-  background: var(--subtle); color: var(--text); font-weight: 600; border: 1px solid var(--border);
-}
-.kb-nav-step-item.done { color: var(--text); }
-.kb-step-num {
-  display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
-  border-radius: 3px; font-size: 11px; font-weight: 600; background: var(--subtle); color: var(--text);
-}
-.kb-nav-persona {
-  display: flex; align-items: center; gap: 6px; background: var(--subtle);
-  border: 1px solid var(--border); padding: 3px 10px; border-radius: 4px; font-size: 13px; color: var(--text);
-}
-.kb-avatar-chip {
-  width: 18px; height: 18px; border-radius: 3px; background: var(--border);
-  color: var(--text); font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
-}
-
-.kb-plain-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin: 10px 0 14px 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--surface);
-}
-.kb-plain-table th {
-  background: var(--subtle);
-  color: var(--text);
-  font-weight: 600;
-  font-size: 12px;
-  padding: 9px 13px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-.kb-plain-table td {
-  padding: 9px 13px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-  font-size: 13px;
-  vertical-align: top;
-  background: var(--surface);
-}
-.kb-plain-table tr:last-child td { border-bottom: none; }
-</style>
-""").strip(), unsafe_allow_html=True)
-
-# ─── NATIVE THEME VARIABLES (Phase 5) ─────────────────────────────────────────
-def get_theme_vars() -> str:
-    if not hasattr(st, "context") or not hasattr(st.context, "theme"):
-        raise RuntimeError("st.context.theme does not exist")
-    theme_type = getattr(st.context.theme, "type", None)
-    is_dark = str(theme_type).lower() == "dark"
-    if is_dark:
-        return textwrap.dedent("""
-        <style>
-        :root {
-          --surface: #121215;
-          --subtle: #18181B;
-          --border: #27272A;
-          --divider: #1F1F23;
-          --text: #FAFAFA;
-          --text-2: #A1A1AA;
-          --muted: #71717A;
-          --pill-info-bg: #1E1B4B;
-          --pill-info-text: #A5B4FC;
-        }
-        </style>
-        """).strip()
-    else:
-        return textwrap.dedent("""
-        <style>
-        :root {
-          --surface: #FFFFFF;
-          --subtle: #F8FAFC;
-          --border: #E4E4E7;
-          --divider: #F1F5F9;
-          --text: #09090B;
-          --text-2: #52525B;
-          --muted: #A1A1AA;
-          --pill-info-bg: #EEF2FF;
-          --pill-info-text: #4F46E5;
-        }
-        </style>
-        """).strip()
-
-st.markdown(get_theme_vars(), unsafe_allow_html=True)
+inject_theme_css(_theme_mode)
+render_theme_toggle()
 
 
 # ─── INLINE SVG HELPERS ───────────────────────────────────────────────────────
@@ -452,321 +550,6 @@ def render_receipt_card(name: str, timestamp: str, project: str, employee: str) 
         </div>
     </div>
     """).strip()
-
-
-
-# ─── DEMO DATA ────────────────────────────────────────────────────────────────
-DEMO_KNOWLEDGE_PROFILE = {
-    "summary": (
-        "Sarah Chen served as Senior Backend Engineer on PayFlow for 3 years, "
-        "architecting the core payment processing microservice. Key decisions include "
-        "the PostgreSQL over MongoDB choice, the circuit breaker pattern, and the "
-        "Stripe SDK integration. Critical risks include a pending database migration "
-        "and an expiring vendor contract with DataVerify Inc. Several Redis caching "
-        "strategies remain undocumented and require immediate attention."
-    ),
-    "decisions": [
-        {
-            "text": "Chose PostgreSQL over MongoDB for transaction storage to ensure ACID compliance for financial data.",
-            "source": "architecture_notes.md",
-            "source_type": "file",
-            "confidence": "HIGH",
-            "excerpt": "After evaluating MongoDB's eventual consistency model, we decided PostgreSQL was non-negotiable for payment ledger tables where ACID guarantees matter most."
-        },
-        {
-            "text": "Implemented Circuit Breaker pattern using the resilience4j library to handle downstream payment gateway failures gracefully.",
-            "source": "owner/payflow/README",
-            "source_type": "github",
-            "confidence": "HIGH",
-            "excerpt": "Circuit breaker configured with 50% failure threshold and 10s half-open window. See PaymentGatewayService.java for impl."
-        },
-        {
-            "text": "Adopted event-driven architecture with Kafka for async notification delivery, decoupling payment processing from email/SMS.",
-            "source": "architecture_notes.md",
-            "source_type": "file",
-            "confidence": "MEDIUM",
-            "excerpt": "Kafka topics: payflow.payment.completed, payflow.payment.failed, payflow.refund.initiated"
-        },
-        {
-            "text": "Chose Stripe SDK over direct API integration for PCI-DSS compliance — avoids storing raw card data on our servers.",
-            "source": "Handover Notes",
-            "source_type": "text",
-            "confidence": "HIGH",
-            "excerpt": "NEVER implement raw card storage. Stripe handles tokenization. This was a deliberate legal decision."
-        },
-        {
-            "text": "Rate limiting set at 1000 requests/minute per merchant using Redis sliding window counter — prevents API abuse.",
-            "source": "owner/payflow/README",
-            "source_type": "github",
-            "confidence": "MEDIUM",
-            "excerpt": "RateLimiter bean in infrastructure/RateLimiterConfig.java. Adjust RATE_LIMIT_RPM env var to change."
-        },
-        {
-            "text": "Blue-green deployment strategy adopted for zero-downtime releases; Kubernetes manifests in /k8s directory.",
-            "source": "architecture_notes.md",
-            "source_type": "file",
-            "confidence": "MEDIUM",
-            "excerpt": "Blue/green via two Deployments sharing same LoadBalancer Service. Switch traffic by updating selector labels."
-        },
-    ],
-    "risks": [
-        {
-            "text": "PostgreSQL schema migration v2.4 is incomplete — 3 tables require column additions before Q1 deadline.",
-            "source": "Handover Notes",
-            "confidence": "HIGH",
-            "excerpt": "Migration scripts in /db/migrations/v2.4/ — DO NOT run in production without DBA review. Needs ~4h maintenance window."
-        },
-        {
-            "text": "DataVerify Inc. vendor contract expires December 31st — identity verification will break if not renewed.",
-            "source": "architecture_notes.md",
-            "confidence": "HIGH",
-            "excerpt": "Contact: James Whitfield (james@dataverify.io). Contract ID: DV-2021-0847. Auto-renewal was disabled."
-        },
-        {
-            "text": "Redis cluster has no documented failover procedure — if primary node fails, rate limiting and session caching will be lost.",
-            "source": "owner/payflow/open-issues",
-            "confidence": "MEDIUM",
-            "excerpt": "Issue #47: Redis failover runbook missing. Assigned to Sarah (never completed)."
-        },
-        {
-            "text": "Mobile team has an undocumented direct dependency on the /v1/legacy-payments endpoint which is marked for deprecation.",
-            "source": "Handover Notes",
-            "confidence": "LOW",
-            "excerpt": "I believe mobile is using the old endpoint but I never got written confirmation. CHECK BEFORE DEPRECATING."
-        },
-    ],
-    "unresolved": [
-        {
-            "question": "What is the Redis cache invalidation strategy for user session tokens?",
-            "why_unknown": "Only verbal discussions with the infrastructure team were found. No written documentation exists in any source."
-        },
-        {
-            "question": "Is the mobile team actually calling /v1/legacy-payments in production?",
-            "why_unknown": "Mobile team dependency was flagged by Sarah as uncertain. No API logs or mobile team documentation was provided."
-        },
-        {
-            "question": "What is the disaster recovery RTO/RPO for PayFlow?",
-            "why_unknown": "DR documentation was referenced in commits but the actual DR doc was not included in any source material."
-        },
-    ],
-    "contacts": [
-        {"name": "Marcus Rivera", "role": "DevOps lead — owns Kubernetes cluster and CI/CD pipeline", "source": "Handover Notes"},
-        {"name": "Priya Sharma", "role": "Product Manager — owns roadmap and stakeholder communication", "source": "Handover Notes"},
-        {"name": "James Whitfield", "role": "DataVerify Inc. vendor contact (james@dataverify.io) — for contract renewal", "source": "architecture_notes.md"},
-    ],
-    "dependencies": [
-        {"item": "Stripe", "description": "Payment gateway SDK. All card processing routes through Stripe. PCI-DSS compliance depends on this.", "source": "architecture_notes.md"},
-        {"item": "Kafka (Confluent Cloud)", "description": "Async messaging for payment events. Credentials in AWS Secrets Manager under /payflow/kafka.", "source": "owner/payflow/README"},
-        {"item": "DataVerify Inc.", "description": "Identity verification vendor. Contract expires Dec 31. KYC flows break without this.", "source": "architecture_notes.md"},
-        {"item": "Redis (AWS ElastiCache)", "description": "Rate limiting and session caching. No documented failover procedure.", "source": "owner/payflow/open-issues"},
-        {"item": "Mobile Team", "description": "Internal team with possible dependency on legacy endpoint. Status unclear.", "source": "Handover Notes"},
-    ]
-}
-
-DEMO_MANAGER_HANDOVER = """# Manager Handover — PayFlow Project
-### Departing: Sarah Chen | Senior Backend Engineer
-
----
-
-## Executive Summary
-PayFlow is a production-grade payment processing microservice processing thousands of transactions daily. Sarah Chen, its primary architect and engineer for 3 years, is departing. This handover identifies **two critical time-sensitive risks** requiring immediate management action before her last day.
-
-## Key Decisions & Rationale
-| Decision | Business Impact |
-|----------|----------------|
-| PostgreSQL for transactions | ACID compliance — critical for financial audit trails |
-| Stripe SDK integration | PCI-DSS compliance — avoids costly card data liability |
-| Circuit Breaker pattern | Resilience — payment gateway outages do not cascade |
-| Event-driven (Kafka) | Scale — async processing supports 10x transaction growth |
-
-## Critical Risks — Action Required
-1. **Database Migration Incomplete** — v2.4 schema changes must be completed before Q1. Requires a 4-hour maintenance window and DBA oversight. Assign immediately.
-2. **Vendor Contract Expiring Dec 31** — DataVerify Inc. identity verification contract auto-renewal was disabled. Contact James Whitfield (james@dataverify.io) this week.
-3. **Redis Failover Undocumented** — If the caching layer fails, rate limiting breaks. Ask DevOps (Marcus Rivera) to document the runbook.
-
-## Ownership & Contacts
-- **Marcus Rivera** — DevOps, Kubernetes, CI/CD (first call for infra issues)
-- **Priya Sharma** — Product Manager, roadmap owner, stakeholder communication
-- **James Whitfield** — DataVerify vendor, contract renewal (external)
-
-## External Dependencies
-| Vendor/Service | Criticality | Action Required |
-|---------------|-------------|-----------------|
-| Stripe | Critical | Monitor SDK updates |
-| DataVerify Inc. | Critical | Renew contract before Dec 31 |
-| Confluent Kafka | High | Check Confluent Cloud billing |
-| AWS ElastiCache (Redis) | High | Document failover procedure |
-
-## Open Items Requiring Management Action
-- [ ] Assign engineer to complete DB migration v2.4
-- [ ] Renew DataVerify contract (deadline: Dec 31)
-- [ ] Confirm mobile team's dependency on legacy endpoint
-- [ ] Hire/assign Redis failover runbook owner
-- [ ] Schedule 1:1 knowledge transfer sessions with Marcus Rivera
-"""
-
-DEMO_NEWHIRE_HANDOVER = """# Technical Successor Handover — PayFlow Technical Guide
-### From: Sarah Chen | To: Technical Successor
-
----
-
-## Architecture & Technical Decisions
-
-### Why PostgreSQL (not MongoDB)?
-We evaluated MongoDB in 2021. The eventual consistency model is not acceptable for a financial ledger. Every payment record needs ACID guarantees. If someone ever suggests switching to MongoDB again, reference Issue #3 in the repository.
-
-### Circuit Breaker Pattern
-`PaymentGatewayService.java` uses resilience4j. The thresholds (50% failure rate, 10s half-open window) were tuned over 6 months. Do not change them without load testing.
-
-### Kafka Topics
-```
-payflow.payment.completed   → triggers email/SMS notifications
-payflow.payment.failed      → triggers retry logic and alerts
-payflow.refund.initiated    → triggers refund workflow
-```
-Credentials: AWS Secrets Manager → `/payflow/kafka/`
-
-### Stripe Integration
-We use the Stripe SDK deliberately. Never store raw card data. Never bypass the SDK for efficiency. This is a legal and compliance decision, not a technical preference.
-
-## What Not To Break
-
-| Area | Context |
-|------|---------|
-| `/v1/legacy-payments` endpoint | Mobile team may depend on it. Confirm before deprecating. |
-| PostgreSQL migration v2.4 | Incomplete. Run in staging first with a DBA. |
-| Rate limiter config | 1000 req/min per merchant. Changing this needs product sign-off. |
-| Blue/green deploy selector | Wrong label routes traffic to wrong version. Verify Kubernetes manifests. |
-
-## Key Contacts
-- **Marcus Rivera** — Infrastructure, Kubernetes, deployment issues (#devops).
-- **Priya Sharma** — Product roadmap, merchant requirements, business escalations.
-- **James Whitfield** (james@dataverify.io) — DataVerify KYC API issues. Contract expires Dec 31.
-
-## Unresolved Technical Debt
-1. **Redis failover** — No runbook exists. If ElastiCache primary fails, the rate limiter breaks. Consult Marcus Rivera.
-2. **Redis cache invalidation** — Session token TTL strategy was discussed verbally. Verify with infrastructure team.
-3. **DR RTO/RPO** — Referenced in commits but the formal DR specification requires completion before the next compliance audit.
-
-## Deprecated Approaches
-- MongoDB — Evaluated in 2021. Data consistency issues. Abandoned.
-- Direct Stripe API calls — Compliance burden without SDK tokenization. Abandoned.
-- Synchronous notifications — Caused payment timeouts under load. Kafka event architecture resolved this.
-"""
-
-DEMO_EMPLOYEE_GAP_ANSWERS = {
-    "What is the Redis cache invalidation strategy for user session tokens?": (
-        "We use a TTL-based approach: session tokens expire after 30 minutes of inactivity. "
-        "On every authenticated request, the TTL is refreshed. If a user explicitly logs out, "
-        "we delete the key immediately. There is also a daily cleanup cron that sweeps orphaned keys. "
-        "Marcus Rivera and I discussed this over Slack in March 2023 — the infra team preferred "
-        "passive expiry over active invalidation for simplicity."
-    ),
-    "Is the mobile team actually calling /v1/legacy-payments in production?": (
-        "YES — I checked the API gateway logs in August and saw ~200 req/day from the mobile app's "
-        "user-agent hitting /v1/legacy-payments. I told their lead (Dev Kapoor) about deprecation "
-        "plans and he said they would migrate to v2, but I never received a timeline. DO NOT deprecate "
-        "without confirming with Dev first. His Slack handle is @dev.kapoor."
-    ),
-    "What is the disaster recovery RTO/RPO for PayFlow?": (
-        "Unofficial targets are RTO=1hr, RPO=15min based on a conversation with our VP of Engineering "
-        "in Q2 2023. We never formalized this in writing. The PostgreSQL backups run every 15 minutes "
-        "via AWS RDS automated snapshots. Redis is not backed up — it is treated as ephemeral. "
-        "If you lose Redis, you lose active sessions and rate limiter state, but no financial data."
-    ),
-}
-
-DEMO_EMPLOYEE_TRIBAL_KNOWLEDGE = [
-    {
-        "category": "Warning",
-        "title": "Never deploy on Fridays or month-end",
-        "content": (
-            "Merchant transaction volume spikes 3x on the last 3 days of every month. "
-            "A deploy caused a 12-minute outage in June 2022 during peak processing resulting in $8K in failed transactions. "
-            "The SRE team maintains a soft freeze policy, but it is not automated in CI/CD."
-        ),
-    },
-    {
-        "category": "Tip",
-        "title": "Stripe webhook debugging shortcut",
-        "content": (
-            "When payment webhooks fail silently, check Stripe Dashboard → Developers → Webhooks → event response code. "
-            "Most errors are 401s from rotated webhook signing secrets in AWS Secrets Manager not updated in the Stripe dashboard."
-        ),
-    },
-    {
-        "category": "Process",
-        "title": "PCI compliance audit preparation",
-        "content": (
-            "The annual PCI audit occurs in March. ComplianceFirst Inc. requires: "
-            "1) Network diagram (/docs/network-arch.pdf), 2) AWS IAM access control lists, "
-            "3) Proof that no raw card data touches internal servers. Priya Sharma coordinates schedules starting in January."
-        ),
-    },
-    {
-        "category": "History",
-        "title": "GraphQL API evaluation findings",
-        "content": (
-            "In Q3 2022, a GraphQL layer on top of the REST API produced N+1 query bottlenecks on payment history endpoints. "
-            "The mobile team also preferred REST. Reverted in Q4. Resolver logic is preserved in the branch feature/graphql-api."
-        ),
-    },
-    {
-        "category": "Contact",
-        "title": "AWS Technical Account Manager",
-        "content": (
-            "Our AWS TAM is Linda Park (linda.park@aws-tam.example.com). For critical ElastiCache or RDS production incidents, "
-            "emailing her directly yields response within an hour on weekdays."
-        ),
-    },
-]
-
-DEMO_EMPLOYEE_HANDOVER = """# Employee Notes — Sarah Chen | PayFlow
-### Knowledge Addendum
-
----
-
-## Employee Corrections and Context
-
-### Decision: PostgreSQL over MongoDB
-**Confirmed accurate.** This decision was pivotal during the 2023 compliance audit. Auditors reviewed data consistency guarantees and PostgreSQL ACID compliance passed inspection.
-
-### Decision: Circuit Breaker pattern
-**Confirmed accurate.** The 50% failure threshold and 10s half-open window were calibrated through 6 months of production telemetry. Do not adjust without benchmark load testing.
-
-### Risk: Mobile team legacy endpoint
-**Active risk.** API gateway telemetry verified ~200 requests/day from mobile clients to `/v1/legacy-payments`. Coordinate with Dev Kapoor (@dev.kapoor) prior to endpoint deprecation.
-
----
-
-## Resolved Questions
-
-### What is the Redis cache invalidation strategy for user session tokens?
-TTL sliding expiration set to 30 minutes. Explicit logout executes instant key eviction. Daily cron sweeps expired references. Agreed verbally with Marcus Rivera in March 2023.
-
-### Is the mobile team actually calling /v1/legacy-payments in production?
-Confirmed active. ~200 requests/day recorded in gateway telemetry. Dev Kapoor informed; awaiting migration commit.
-
-### What is the disaster recovery RTO/RPO for PayFlow?
-Working targets: RTO = 1 hour, RPO = 15 minutes. PostgreSQL backups run via 15-minute RDS snapshots. Redis is ephemeral.
-
----
-
-## Tribal Knowledge and Constraints
-
-### Warning: Deployment freezes on month-end
-Transaction volume increases 3x during month-end closes. Deployments are discouraged during the final three calendar days.
-
-### Tip: Stripe webhook triage
-Verify Stripe Dashboard event response codes first before inspecting CloudWatch logs.
-
-### Process: PCI audit requirements
-Annual March audit requires updated network diagrams, IAM access lists, and SDK tokenization verification.
-
-### Contact: AWS escalation
-Direct TAM contact: Linda Park (linda.park@aws-tam.example.com).
-"""
-
 
 
 
@@ -911,7 +694,7 @@ def render_role_status_line(role: str):
 
 
 def render_login_page():
-    """Renders the login page with demo accounts guide."""
+    """Renders the login page."""
     col_pad1, col_center, col_pad2 = st.columns([1, 2, 1])
     with col_center:
         st.markdown(textwrap.dedent("""
@@ -920,6 +703,7 @@ def render_login_page():
               <div style="font-size:14px;color:var(--text-2);margin-top:4px;">Institutional knowledge preservation and handover platform</div>
             </div>
         """).strip(), unsafe_allow_html=True)
+        st.caption("Demo data: the names Sarah Chen, Marcus Vance and Manager are synthetic. No real people or company information is used.")
 
         with st.container(border=True):
             with st.form("login_form", clear_on_submit=False):
@@ -944,6 +728,7 @@ def render_login_page():
                         notice = load_into_session(st.session_state)
                         if notice:
                             st.session_state.state_notice = notice
+                        ensure_member(st.session_state, user)
                         log_audit_entry(st.session_state, user["username"], "Login successful")
                         if user["role"] == "Manager":
                             st.session_state.page = "review"
@@ -955,15 +740,6 @@ def render_login_page():
                     else:
                         log_audit_entry(st.session_state, (username_input or "").strip() or "anonymous", "Failed login attempt", reason=msg)
                         st.error(msg)
-
-        st.markdown(textwrap.dedent("""
-            <div style="background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-top:16px;font-size:13px;color:var(--text-2);">
-              <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Demo accounts for evaluation (synthetic data)</div>
-              <div style="margin-bottom:3px;"><code style="font-family:monospace;">manager</code> / <code>Manager@123</code> &rarr; Manager</div>
-              <div style="margin-bottom:3px;"><code style="font-family:monospace;">sarah</code> / <code>Sarah@123</code> &rarr; Employee (Sarah Chen)</div>
-              <div><code style="font-family:monospace;">marcus</code> / <code>Marcus@123</code> &rarr; Successor (Marcus Vance)</div>
-            </div>
-        """).strip(), unsafe_allow_html=True)
 
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
@@ -1007,25 +783,37 @@ with st.sidebar:
         """).strip(), unsafe_allow_html=True)
 
         # 5. Nav buttons
-        if auth_role == "Manager":
-            nav_pages = [
-                ("review",   "Manager review"),
-                ("handover", "Handover package"),
-                ("audit",    "Audit log"),
-            ]
-        elif auth_role == "Employee":
-            nav_pages = [
-                ("connect",        "Connect sources"),
-                ("reconstruct",    "Reconstruct"),
-                ("employee",       "Employee hub"),
-                ("employee_notes", "My notes"),
-            ]
-        elif auth_role == "Successor":
-            nav_pages = [
-                ("successor_handover", "Technical handover"),
-            ]
-        else:
-            nav_pages = []
+        PAGE_LABELS = {
+            "connect": "Connect sources",
+            "reconstruct": "Reconstruct",
+            "employee": "Employee hub",
+            "employee_notes": "My notes",
+            "review": "Manager review",
+            "handover": "Handover package",
+            "successor_handover": "Technical handover",
+            "audit": "Audit log",
+            "my_access": "My access",
+            "access_management": "Access management",
+            "notifications": "Notifications",
+            "confidential": "Confidential files",
+        }
+
+        current_member = {
+            "id": auth_user,
+            "username": auth_user,
+            "name": auth_name,
+            "role": auth_role,
+        }
+        allowed_page_ids = get_allowed_pages(st.session_state, current_member)
+        unread_count = sum(1 for n in st.session_state.get("notifications", []) if n.get("to") == auth_user and not n.get("read"))
+
+        nav_pages = []
+        for pid in allowed_page_ids:
+            if pid == "notifications":
+                lbl = f"Notifications ({unread_count})" if unread_count > 0 else "Notifications"
+            else:
+                lbl = PAGE_LABELS.get(pid, pid.replace("_", " ").title())
+            nav_pages.append((pid, lbl))
 
         for page_id, page_label in nav_pages:
             is_active = st.session_state.page == page_id
@@ -1062,6 +850,15 @@ if not st.session_state.get("authenticated"):
     render_login_page()
     st.stop()
 
+# Toast notifications for unread items
+_cur_uid = st.session_state.get("auth_username", "")
+if "toasted_ids" not in st.session_state or not isinstance(st.session_state.toasted_ids, set):
+    st.session_state.toasted_ids = set()
+for notif in st.session_state.get("notifications", []):
+    if notif.get("to") == _cur_uid and not notif.get("read") and notif.get("id") not in st.session_state.toasted_ids:
+        st.toast(notif.get("message", ""))
+        st.session_state.toasted_ids.add(notif.get("id"))
+
 # ─── ROLE-BASED ACCESS CONTROL ────────────────────────────────────────────────
 ROLE_PERMISSIONS = {
     "Manager":   ["review", "handover", "audit"],
@@ -1069,11 +866,22 @@ ROLE_PERMISSIONS = {
     "Successor": ["successor_handover"],
 }
 
-_current_role = st.session_state.get("auth_role", "")
-_allowed_pages = ROLE_PERMISSIONS.get(_current_role, [])
+_current_member = {
+    "id": st.session_state.get("auth_username", ""),
+    "username": st.session_state.get("auth_username", ""),
+    "name": st.session_state.get("auth_name", ""),
+    "role": st.session_state.get("auth_role", ""),
+}
+_allowed_pages = get_allowed_pages(st.session_state, _current_member)
 
 if st.session_state.page not in _allowed_pages:
-    st.error("Access denied for your role.")
+    log_audit_entry(
+        st.session_state,
+        _current_member["id"] or "unknown",
+        "access denied",
+        reason=f"Attempted to access {st.session_state.page}"
+    )
+    st.error("Access denied for your role")
     st.stop()
 
 # Log page views once per navigation
@@ -1091,6 +899,7 @@ if st.session_state.get("state_notice"):
 # PAGE 1: CONNECT SOURCES
 # ═══════════════════════════════════════════════════════════════════════════════
 if st.session_state.page == "connect":
+    require_page_access("connect")
     step_indicator("connect")
 
 
@@ -1181,19 +990,19 @@ if st.session_state.page == "connect":
 
     with col_right:
         emp_raw = (st.session_state.get("employee_name") or "").strip()
-        emp_display = emp_raw if emp_raw else '<span style="color:var(--muted);">Not provided</span>'
+        emp_display = emp_raw if emp_raw else '<span style="color:var(--text2);">Not provided</span>'
 
         role_raw = (st.session_state.get("project_role") or "").strip()
-        role_display = role_raw if role_raw else '<span style="color:var(--muted);">Not provided</span>'
+        role_display = role_raw if role_raw else '<span style="color:var(--text2);">Not provided</span>'
 
         file_count = len(st.session_state.uploaded_files) if st.session_state.uploaded_files else 0
-        file_display = f"{file_count} uploaded" if file_count > 0 else '<span style="color:var(--muted);">Not provided</span>'
+        file_display = f"{file_count} uploaded" if file_count > 0 else '<span style="color:var(--text2);">Not provided</span>'
 
         has_gh = bool(st.session_state.github_url.strip())
-        gh_display = st.session_state.github_url.strip() if has_gh else '<span style="color:var(--muted);">Not provided</span>'
+        gh_display = st.session_state.github_url.strip() if has_gh else '<span style="color:var(--text2);">Not provided</span>'
 
         notes_raw = st.session_state.pasted_text.strip()
-        notes_display = f"{len(notes_raw)} chars" if notes_raw else '<span style="color:var(--muted);">Not provided</span>'
+        notes_display = f"{len(notes_raw)} chars" if notes_raw else '<span style="color:var(--text2);">Not provided</span>'
 
         has_sources = bool(
             (st.session_state.uploaded_files) or
@@ -1216,24 +1025,24 @@ if st.session_state.page == "connect":
           </div>
           <table style="width:100%;border-collapse:collapse;font-size:13px;">
             <tbody>
-              <tr style="border-bottom:1px solid var(--divider);">
-                <td style="padding:8px 0;color:var(--text-2);width:40%;">Departing engineer</td>
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 0;color:var(--text2);width:40%;">Departing engineer</td>
                 <td style="padding:8px 0;color:var(--text);font-weight:500;">{emp_display}</td>
               </tr>
-              <tr style="border-bottom:1px solid var(--divider);">
-                <td style="padding:8px 0;color:var(--text-2);">Project scope</td>
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 0;color:var(--text2);">Project scope</td>
                 <td style="padding:8px 0;color:var(--text);font-weight:500;">{role_display}</td>
               </tr>
-              <tr style="border-bottom:1px solid var(--divider);">
-                <td style="padding:8px 0;color:var(--text-2);">Source documents</td>
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 0;color:var(--text2);">Source documents</td>
                 <td style="padding:8px 0;color:var(--text);font-weight:500;">{file_display}</td>
               </tr>
-              <tr style="border-bottom:1px solid var(--divider);">
-                <td style="padding:8px 0;color:var(--text-2);">Code repository</td>
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:8px 0;color:var(--text2);">Code repository</td>
                 <td style="padding:8px 0;color:var(--text);font-weight:500;">{gh_display}</td>
               </tr>
               <tr>
-                <td style="padding:8px 0;color:var(--text-2);">Notes</td>
+                <td style="padding:8px 0;color:var(--text2);">Notes</td>
                 <td style="padding:8px 0;color:var(--text);font-weight:500;">{notes_display}</td>
               </tr>
             </tbody>
@@ -1338,9 +1147,12 @@ if st.session_state.page == "connect":
                     try:
                         from utils.gemini_engine import analyze_sources
                         profile = analyze_sources(all_sources, st.session_state.api_key)
-                        st.session_state.knowledge_profile = profile
+                        def _rec(d):
+                            d["knowledge_profile"] = profile
+                            d["all_sources"] = all_sources
+                            d["analyses_run"] = st.session_state.analyses_run
+                        modify_project_state(_rec, session_state=st.session_state)
                         log_audit_entry(st.session_state, st.session_state.get("auth_username","user"), "Knowledge profile reconstructed")
-                        save_project_state(st.session_state)
                         st.session_state.page = "reconstruct"
                         st.rerun()
                     except Exception as e:
@@ -1352,6 +1164,7 @@ if st.session_state.page == "connect":
 # PAGE 2: RECONSTRUCT KNOWLEDGE PROFILE
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "reconstruct":
+    require_page_access("reconstruct")
     step_indicator("reconstruct")
 
     profile = st.session_state.knowledge_profile
@@ -1557,6 +1370,7 @@ elif st.session_state.page == "reconstruct":
 # PAGE 3: EMPLOYEE HUB
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "employee":
+    require_page_access("employee")
     step_indicator("employee")
 
     profile = st.session_state.knowledge_profile
@@ -1789,12 +1603,15 @@ elif st.session_state.page == "employee":
             submit_tribal = st.form_submit_button("Add tribal knowledge item", use_container_width=True)
             if submit_tribal:
                 if t_title.strip() and t_content.strip():
-                    st.session_state.employee_tribal_knowledge.append({
+                    new_item = {
                         "category": category,
                         "title": t_title.strip(),
                         "content": t_content.strip()
-                    })
-                    save_project_state(st.session_state)
+                    }
+                    def _add_tk(d):
+                        d.setdefault("employee_tribal_knowledge", []).append(new_item)
+                    modify_project_state(_add_tk, session_state=st.session_state)
+                    record_write(st.session_state, "tribal")
                     st.toast(f"Added: {t_title.strip()}")
                     st.rerun()
                 else:
@@ -1817,13 +1634,21 @@ elif st.session_state.page == "employee":
                 with c_del:
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("Remove", key=f"del_tk_{idx}"):
-                        st.session_state.employee_tribal_knowledge.pop(idx)
+                        def _del_tk(d):
+                            tk_list = d.get("employee_tribal_knowledge", [])
+                            if 0 <= idx < len(tk_list):
+                                tk_list.pop(idx)
+                        modify_project_state(_del_tk, session_state=st.session_state)
+                        record_write(st.session_state, "tribal")
                         st.rerun()
 
     st.markdown("---")
     col_nav1, col_nav2 = st.columns([2, 1])
     with col_nav1:
         if st.button("Proceed to manager review", type="primary", use_container_width=True):
+            mgr_id = get_manager_id(st.session_state)
+            emp_name = st.session_state.get("auth_name", "Employee")
+            add_notification(st.session_state, mgr_id, "submit_review", f"{emp_name} submitted the handover for review.")
             st.session_state.page = "review"
             st.rerun()
     with col_nav2:
@@ -1836,6 +1661,7 @@ elif st.session_state.page == "employee":
 # PAGE 4: MANAGER REVIEW & APPROVALS
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "review":
+    require_page_access("review")
     step_indicator("review")
 
     profile = st.session_state.knowledge_profile
@@ -1945,17 +1771,25 @@ elif st.session_state.page == "review":
             btn_app_col, btn_rej_col = st.columns(2)
             with btn_app_col:
                 if st.button("Approve section", key=f"btn_app_{section_id}", use_container_width=True):
-                    st.session_state.approvals[section_id] = True
+                    def _app_sec(d):
+                        d.setdefault("approvals", {})[section_id] = True
+                    modify_project_state(_app_sec, session_state=st.session_state)
                     log_audit_entry(st.session_state, st.session_state.get("auth_username","manager"), f"Approved section: {section_title}")
-                    save_project_state(st.session_state)
                     st.rerun()
 
             with btn_rej_col:
                 if st.button("Reject section", key=f"btn_rej_{section_id}", use_container_width=True):
                     rej_text = st.session_state.get(f"rej_reason_{section_id}", "").strip() or "Rejected by manager"
-                    st.session_state.approvals[section_id] = "rejected"
+                    def _rej_sec(d):
+                        d.setdefault("approvals", {})[section_id] = "rejected"
+                    modify_project_state(_rej_sec, session_state=st.session_state)
                     log_audit_entry(st.session_state, st.session_state.get("auth_username","manager"), f"Rejected section: {section_title}", reason=rej_text)
-                    save_project_state(st.session_state)
+                    emp_id = get_employee_id(st.session_state)
+                    if "confidential" in section_title.lower() or "confidential" in section_id.lower():
+                        rej_notif = "The manager rejected a confidential section."
+                    else:
+                        rej_notif = f"The manager rejected the section {section_title}. See the comment on Employee hub."
+                    add_notification(st.session_state, emp_id, "section_rejected", rej_notif)
                     st.rerun()
 
             st.text_input(
@@ -2120,8 +1954,17 @@ elif st.session_state.page == "review":
                         st.warning(f"Employee handover note: {_safe_err(e)}")
                         st.session_state.employee_handover = ""
 
+                    def _save_pkg(d):
+                        d["manager_handover"] = st.session_state.manager_handover
+                        d["newhire_handover"] = st.session_state.newhire_handover
+                        d["employee_handover"] = st.session_state.employee_handover
+                        d["handovers_run"] = st.session_state.handovers_run
+                    modify_project_state(_save_pkg, session_state=st.session_state)
                     log_audit_entry(st.session_state, st.session_state.get("auth_username","manager"), "Handover package generated")
-                    save_project_state(st.session_state)
+                    emp_id = get_employee_id(st.session_state)
+                    succ_id = get_successor_id(st.session_state)
+                    add_notification(st.session_state, emp_id, "package_generated", "The handover package is ready.")
+                    add_notification(st.session_state, succ_id, "package_generated", "The handover package is ready.")
                     st.session_state.page = "handover"
                     st.rerun()
 
@@ -2138,6 +1981,7 @@ elif st.session_state.page == "review":
 # PAGE 5: FINAL HANDOVER PACKAGE
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "handover":
+    require_page_access("handover")
     step_indicator("handover")
 
     if not st.session_state.manager_handover or not st.session_state.newhire_handover:
@@ -2242,12 +2086,14 @@ elif st.session_state.page == "handover":
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("Acknowledge receipt", key="btn_ack_receipt", use_container_width=True):
                     confirmed_name = succ_name_input.strip() or "Successor"
-                    st.session_state.acknowledgement = {
+                    ack_val = {
                         "name": confirmed_name,
                         "time": time.strftime("%Y-%m-%d %H:%M:%S")
                     }
+                    def _ack(d):
+                        d["acknowledgement"] = ack_val
+                    modify_project_state(_ack, session_state=st.session_state)
                     log_audit_entry(st.session_state, st.session_state.get("auth_username","successor"), f"Handover acknowledged by {confirmed_name}")
-                    save_project_state(st.session_state)
                     st.rerun()
 
         st.markdown("---")
@@ -2281,11 +2127,11 @@ elif st.session_state.page == "handover":
     col_reset1, col_reset2 = st.columns(2)
     with col_reset1:
         if st.button("Start new handover", use_container_width=True):
-            from utils.store import get_empty_state
             _empty = get_empty_state()
-            for k, v in _empty.items():
-                st.session_state[k] = v
-            save_project_state(st.session_state)
+            def _reset(d):
+                for k, v in _empty.items():
+                    d[k] = v
+            modify_project_state(_reset, session_state=st.session_state)
             st.session_state.page = "connect"
             st.rerun()
 
@@ -2298,9 +2144,7 @@ elif st.session_state.page == "handover":
 # PAGE 6: EMPLOYEE NOTES (Employee role only)
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "employee_notes":
-    if st.session_state.get("auth_role") != "Employee":
-        st.error("Access denied for your role.")
-        st.stop()
+    require_page_access("employee_notes")
     step_indicator("employee_notes")
     render_role_status_line("Employee")
 
@@ -2337,9 +2181,7 @@ elif st.session_state.page == "employee_notes":
 # PAGE 7: SUCCESSOR HANDOVER (Successor role only)
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "successor_handover":
-    if st.session_state.get("auth_role") != "Successor":
-        st.error("Access denied for your role.")
-        st.stop()
+    require_page_access("successor_handover")
     step_indicator("successor_handover")
     render_role_status_line("Successor")
 
@@ -2401,12 +2243,14 @@ elif st.session_state.page == "successor_handover":
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Acknowledge receipt", key="btn_ack_receipt_suc", use_container_width=True):
                 confirmed_name = succ_name_input.strip() or st.session_state.get("auth_name", "Successor")
-                st.session_state.acknowledgement = {
+                ack_val = {
                     "name": confirmed_name,
                     "time": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
+                def _ack(d):
+                    d["acknowledgement"] = ack_val
+                modify_project_state(_ack, session_state=st.session_state)
                 log_audit_entry(st.session_state, st.session_state.get("auth_username","successor"), f"Handover acknowledged by {confirmed_name}")
-                save_project_state(st.session_state)
                 st.rerun()
 
     st.markdown("---")
@@ -2423,9 +2267,7 @@ elif st.session_state.page == "successor_handover":
 # PAGE 8: AUDIT LOG (Manager only)
 # ═══════════════════════════════════════════════════════════════════════════════
 elif st.session_state.page == "audit":
-    if st.session_state.get("auth_role") != "Manager":
-        st.error("Access denied for your role.")
-        st.stop()
+    require_page_access("audit")
     step_indicator("audit")
 
     st.markdown(textwrap.dedent("""
@@ -2491,3 +2333,308 @@ elif st.session_state.page == "audit":
             mime="text/csv",
             use_container_width=False,
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 9: MY ACCESS
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "my_access":
+    require_page_access("my_access")
+    st.header("My access")
+
+    cur_user = {
+        "id": st.session_state.get("auth_username", ""),
+        "username": st.session_state.get("auth_username", ""),
+        "name": st.session_state.get("auth_name", ""),
+        "role": st.session_state.get("auth_role", ""),
+    }
+    eff = get_effective_access(cur_user, st.session_state)
+    st.table([{
+        "Name": eff["name"],
+        "Role": eff["role"],
+        "Project content": eff["project_content"],
+        "Confidential files": eff["confidential_files"],
+    }])
+
+    st.subheader("Request access")
+    cur_grants = get_member_grants(st.session_state, cur_user["id"])
+    if cur_user["role"] == "Employee":
+        candidates = ["confidential_read", "confidential_write"]
+    else:
+        candidates = ["normal_write", "confidential_read", "confidential_write"]
+
+    available = [c for c in candidates if c not in cur_grants]
+    if "confidential_write" in cur_grants:
+        available = [c for c in available if c != "confidential_read"]
+
+    if available:
+        req_type_choice = st.selectbox(
+            "Access type",
+            options=available,
+            format_func=lambda x: REQUEST_LABELS.get(x, x),
+            key="my_access_req_type"
+        )
+        my_reqs = [
+            r for r in st.session_state.get("access_requests", [])
+            if r.get("requester_id") == cur_user["id"]
+        ]
+        has_pending = any(
+            r.get("type") == req_type_choice and r.get("status") == "pending"
+            for r in my_reqs
+        )
+        if has_pending:
+            st.info("You already have a pending request for this.")
+        else:
+            reason = st.text_area("Reason (optional)", key="my_access_reason")
+            if st.button("Send request", type="primary", key="btn_send_req"):
+                create_request(st.session_state, cur_user, req_type_choice, reason)
+                st.rerun()
+    else:
+        st.info("You hold all available permissions.")
+
+    st.subheader("My requests")
+    my_reqs = [
+        r for r in st.session_state.get("access_requests", [])
+        if r.get("requester_id") == cur_user["id"]
+    ]
+    if my_reqs:
+        req_table = []
+        for r in reversed(my_reqs):
+            req_table.append({
+                "Requested": REQUEST_LABELS.get(r.get("type"), r.get("type")),
+                "Reason": r.get("reason") or "none given",
+                "Submitted": r.get("created_at", ""),
+                "Status": (r.get("status") or "pending").capitalize(),
+                "Manager comment": r.get("decision_comment") or "—",
+            })
+        st.table(req_table)
+    else:
+        st.caption("No requests submitted yet.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 10: ACCESS MANAGEMENT (Manager only)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "access_management":
+    require_page_access("access_management")
+    st.header("Access management")
+
+    # a. Pending requests
+    st.subheader("Pending requests")
+    pending = [r for r in st.session_state.get("access_requests", []) if r.get("status") == "pending"]
+    if not pending:
+        st.caption("No pending requests.")
+    else:
+        for req in pending:
+            with st.container(border=True):
+                r_id = req["id"]
+                r_name = req.get("requester_name", req.get("requester_id"))
+                r_role = get_role_label(req.get("requester_role", ""))
+                r_type = REQUEST_LABELS.get(req.get("type"), req.get("type"))
+                r_reason = req.get("reason") or "none given"
+                r_date = req.get("created_at", "")
+                st.markdown(f"**{r_name}** ({r_role}) &mdash; {r_type}")
+                st.caption(f"Submitted: {r_date} | Reason: {r_reason}")
+                comment = st.text_input("Comment (optional)", key=f"req_comment_{r_id}")
+                col_app, col_deny, _ = st.columns([1, 1, 4])
+                with col_app:
+                    if st.button("Approve", key=f"btn_app_{r_id}", type="primary"):
+                        mgr = {
+                            "id": st.session_state.get("auth_username", "manager"),
+                            "username": st.session_state.get("auth_username", "manager"),
+                            "role": st.session_state.get("auth_role", "Manager"),
+                        }
+                        decide_request(st.session_state, mgr, r_id, approve=True, comment=comment)
+                        st.rerun()
+                with col_deny:
+                    if st.button("Deny", key=f"btn_deny_{r_id}"):
+                        mgr = {
+                            "id": st.session_state.get("auth_username", "manager"),
+                            "username": st.session_state.get("auth_username", "manager"),
+                            "role": st.session_state.get("auth_role", "Manager"),
+                        }
+                        decide_request(st.session_state, mgr, r_id, approve=False, comment=comment)
+                        st.rerun()
+
+    # b. Members and access
+    st.subheader("Members and access")
+    members_list = list(st.session_state.get("members", []))
+    mgr_username = st.session_state.get("auth_username", "manager")
+    if not any(m.get("id") == mgr_username or m.get("username") == mgr_username for m in members_list):
+        members_list.insert(0, {
+            "id": mgr_username,
+            "username": mgr_username,
+            "name": st.session_state.get("auth_name", "Manager"),
+            "role": "Manager",
+        })
+
+    member_rows = []
+    for m in members_list:
+        eff = get_effective_access(m, st.session_state)
+        member_rows.append({
+            "Name": eff["name"],
+            "Role": eff["role"],
+            "Project content": eff["project_content"],
+            "Confidential files": eff["confidential_files"],
+        })
+    st.table(member_rows)
+
+    # c. For each non-manager active member, an st.expander(name) holding an st.form
+    non_managers = [m for m in members_list if m.get("role") != "Manager"]
+    for m in non_managers:
+        uid = m.get("id") or m.get("username")
+        m_name = m.get("name", uid)
+        with st.expander(m_name):
+            with st.form(f"form_grants_{uid}"):
+                cur_g = get_member_grants(st.session_state, uid)
+                is_employee = (m.get("role") == "Employee")
+                has_write = True if is_employee else ("normal_write" in cur_g)
+                has_cread = "confidential_read" in cur_g or "confidential_write" in cur_g
+                has_cwrite = "confidential_write" in cur_g
+
+                cb_w = st.checkbox(
+                    "Write access to project content",
+                    value=has_write,
+                    disabled=is_employee,
+                    key=f"cb_w_{uid}"
+                )
+                cb_cr = st.checkbox(
+                    "Read confidential files",
+                    value=has_cread,
+                    key=f"cb_cr_{uid}"
+                )
+                cb_cw = st.checkbox(
+                    "Read and write confidential files",
+                    value=has_cwrite,
+                    key=f"cb_cw_{uid}"
+                )
+                if st.form_submit_button("Save access", type="primary"):
+                    mgr = {
+                        "id": st.session_state.get("auth_username", "manager"),
+                        "username": st.session_state.get("auth_username", "manager"),
+                        "role": st.session_state.get("auth_role", "Manager"),
+                    }
+                    new_g = []
+                    if cb_w and not is_employee:
+                        new_g.append("normal_write")
+                    if cb_cr:
+                        new_g.append("confidential_read")
+                    if cb_cw:
+                        new_g.append("confidential_write")
+                        new_g.append("confidential_read")
+                    set_grants(st.session_state, mgr, uid, new_g)
+                    st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 11: NOTIFICATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "notifications":
+    require_page_access("notifications")
+    st.header("Notifications")
+
+    cur_uid = st.session_state.get("auth_username", "")
+    col_n1, col_n2, _ = st.columns([2, 1, 4])
+    with col_n1:
+        if st.button("Mark all as read", key="btn_mark_all_read"):
+            mark_notifications_read(cur_uid, session_state=st.session_state)
+            st.rerun()
+    with col_n2:
+        if st.button("Refresh", key="btn_refresh_notifs"):
+            st.rerun()
+
+    st.caption("Notifications update when you open a page or press Refresh.")
+
+    my_notifs = [n for n in st.session_state.get("notifications", []) if n.get("to") == cur_uid]
+    if not my_notifs:
+        st.caption("No notifications.")
+    else:
+        for n in reversed(my_notifs):
+            with st.container(border=True):
+                is_unread = not n.get("read")
+                prefix = "**New** &mdash; " if is_unread else ""
+                st.markdown(f"{prefix}{n.get('message', '')}")
+                st.caption(n.get("created_at", ""))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE 12: CONFIDENTIAL FILES
+# ═══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.page == "confidential":
+    require_page_access("confidential")
+    st.header("Confidential files")
+
+    cur_user = {
+        "id": st.session_state.get("auth_username", ""),
+        "username": st.session_state.get("auth_username", ""),
+        "name": st.session_state.get("auth_name", ""),
+        "role": st.session_state.get("auth_role", ""),
+    }
+
+    c_files = st.session_state.get("confidential_files", [])
+    if not c_files:
+        st.caption("No confidential files stored.")
+    else:
+        for _cf_idx, cf in enumerate(c_files):
+            with st.container(border=True):
+                _cf_name = cf.get("name", "File")
+                st.markdown(f"**{_cf_name}** ({cf.get('size', 0)} bytes)")
+                st.caption(f"Uploaded: {cf.get('uploaded_at', '')} by {cf.get('uploaded_by', '')}")
+                # Permission check before showing content
+                if can_read(cur_user, is_confidential=True, state=st.session_state):
+                    with st.expander("View file content"):
+                        # Files stored before this fix had content as decoded text string.
+                        # Files stored after this fix have content=None (bytes stored separately).
+                        _cf_content = cf.get("content")
+                        if _cf_content is None:
+                            # New storage: bytes not in db, need re-upload
+                            st.info("File content not available in this session. Re-upload to enable preview.")
+                        elif isinstance(_cf_content, (bytes, bytearray)):
+                            render_file_preview(
+                                _cf_name, bytes(_cf_content),
+                                key_prefix=f"cf_{_cf_idx}",
+                                can_download=True,
+                            )
+                        else:
+                            # Legacy: content was stored as a decoded string
+                            _legacy_bytes = _cf_content.encode("utf-8", errors="replace")
+                            if _legacy_bytes[:4] == b"%PDF" or _cf_name.lower().endswith(".pdf"):
+                                st.warning("This file was stored incorrectly. Please upload it again.")
+                            else:
+                                st.text_area(
+                                    label="File content",
+                                    value=_cf_content,
+                                    height=300,
+                                    disabled=True,
+                                    label_visibility="collapsed",
+                                    key=f"cf_{_cf_idx}_preview",
+                                )
+
+    if can_write(cur_user, is_confidential=True, state=st.session_state):
+        st.subheader("Upload confidential file")
+        up_file = st.file_uploader("Select confidential file", key="conf_file_uploader")
+        if up_file is not None:
+            if st.button("Upload confidential file", type="primary", key="btn_upload_conf"):
+                _conf_bytes = up_file.getvalue()  # read once; second read returns empty
+                if not _conf_bytes:
+                    st.error("The uploaded file is empty. Please upload it again.")
+                else:
+                    _cf_id = register_confidential_meta(
+                        name=up_file.name,
+                        size_bytes=len(_conf_bytes),
+                        uploaded_by=cur_user["id"],
+                    )
+                    # Store metadata in session-state list (no bytes in db)
+                    conf_item = {
+                        "id": _cf_id,
+                        "name": up_file.name,
+                        "size": len(_conf_bytes),
+                        "uploaded_by": cur_user["id"],
+                        "uploaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "content": None,  # bytes not persisted in db per Phase 4
+                    }
+                    def _add_conf(d):
+                        d.setdefault("confidential_files", []).append(conf_item)
+                    modify_project_state(_add_conf, session_state=st.session_state)
+                    log_audit_entry(st.session_state, cur_user["id"], "uploaded confidential file")
+                    st.rerun()
