@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Streamlit secrets — NEVER commit this
+.streamlit/secrets.toml
+**/secrets.toml
+secrets.toml
+
+# Runtime data (SQLite DB, uploads, backups)
+data/
+**/data/
+project_state.json
+project_state.json.bak
+
+# Scratch / local tests
+scratch/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Build artifacts
+*.pptx
+exported_slides_round2/
+outputs/
