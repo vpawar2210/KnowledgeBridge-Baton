@@ -51,6 +51,7 @@ from utils.access import (
     set_grants,
     record_write,
 )
+from utils.safe_table import safe_table
 from utils.demo_seed import (
     hydrate_demo_session_state,
     ensure_demo_database_seeded,
@@ -2876,7 +2877,7 @@ elif st.session_state.page == "my_access":
         "role": st.session_state.get("auth_role", ""),
     }
     eff = get_effective_access(cur_user, st.session_state)
-    st.table([{
+    safe_table([{
         "Name": eff["name"],
         "Role": eff["role"],
         "Project content": eff["project_content"],
@@ -2934,7 +2935,7 @@ elif st.session_state.page == "my_access":
                 "Status": (r.get("status") or "pending").capitalize(),
                 "Manager comment": r.get("decision_comment") or "—",
             })
-        st.table(req_table)
+        safe_table(req_table)
     else:
         st.caption("No requests submitted yet.")
 
@@ -3004,7 +3005,7 @@ elif st.session_state.page == "access_management":
             "Project content": eff["project_content"],
             "Confidential files": eff["confidential_files"],
         })
-    st.table(member_rows)
+    safe_table(member_rows)
 
     # c. For each non-manager active member, an st.expander(name) holding an st.form
     non_managers = [m for m in members_list if m.get("role") != "Manager"]

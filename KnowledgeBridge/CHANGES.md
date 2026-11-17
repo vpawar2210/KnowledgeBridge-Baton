@@ -55,3 +55,12 @@ Implemented the targeted conversational **Gap Interview Engine** in BATON (Knowl
   - Demo authentication tested and verified for `manager`, `sarah`, and `marcus`.
   - Harborline dataset verified intact (8 decisions, 8 risks, 5 unresolved questions).
   - 5-section manager approval gate verified: blocks generation at fewer than 5 approvals and unlocks at 5 of 5 approvals.
+
+---
+
+## Local Windows Workaround (Pyarrow Fix)
+Local Windows workaround: tables fall back to Markdown when pandas/pyarrow is blocked. Hosted behavior unchanged. This commit is LOCAL ONLY and must be reviewed before deploy.
+- Added `KnowledgeBridge/utils/safe_table.py` (`safe_table`, `format_table_markdown`).
+- Replaced 3 call sites in `KnowledgeBridge/app.py` with `safe_table`.
+- Added unit tests in `KnowledgeBridge/tests/test_safe_table.py` (9 tests passing).
+
