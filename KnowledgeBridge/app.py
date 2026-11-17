@@ -25,6 +25,10 @@ from utils.store import (
     modify_project_state,
     mark_notifications_read,
     register_confidential_meta,
+    add_gap_answer,
+    list_gap_answers,
+    gap_progress,
+    get_open_gaps,
 )
 from utils.file_processor import get_preview
 from utils.access import (
@@ -1701,6 +1705,153 @@ elif st.session_state.page == "employee":
         st.markdown('<div class="kb-section-title">Resolve knowledge gaps</div>', unsafe_allow_html=True)
         st.info("Tacit knowledge opportunity: Unanswered questions discovered across codebase and documents. Add the unwritten context before leaving.")
 
+        # ── Gap Interview Engine (Conversational Interview Assistant) ─────────
+        is_leaver = (st.session_state.get("auth_role") == "Employee" or st.session_state.get("auth_username") == "sarah")
+        if is_leaver:
+            st.markdown("### Targeted Gap Interview Assistant")
+            progress = gap_progress()
+            open_gaps_list = get_open_gaps()
+
+            session_answered = st.session_state.get("interview_session_count", 0)
+            skipped_set = st.session_state.get("interview_skipped_ids", set())
+
+            # Progress banner
+            st.markdown(f"""
+            <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px 16px; margin-bottom:14px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700; color:var(--text); font-size:1rem;">Handover Interview Progress</span>
+                    <span class="kb-pill kb-pill-info" style="font-weight:600;">{progress['summary']}</span>
+                </div>
+                <div style="font-size:0.82rem; color:var(--text-2); margin-top:4px;">
+                    Targeted assistant generates contextual questions from unresolved gaps. Submitted answers receive an explicit <b>[ATTESTED]</b> grade.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if not open_gaps_list:
+                st.markdown(textwrap.dedent("""
+                <div class="kb-card kb-card-info" style="margin-bottom:1.5rem; border-left:4px solid var(--accent);">
+                    <h4 style="margin:0 0 6px 0; color:var(--text); font-size:1.05rem;">🎉 All Knowledge Gaps Addressed</h4>
+                    <p style="margin:0; font-size:0.875rem; color:var(--text-2);">All identified documentation gaps have been answered. No open gaps remain for interview.</p>
+                </div>
+                """).strip(), unsafe_allow_html=True)
+            elif session_answered >= 5:
+                st.markdown(textwrap.dedent("""
+                <div class="kb-card kb-card-info" style="margin-bottom:1.5rem; border-left:4px solid var(--accent);">
+                    <h4 style="margin:0 0 6px 0; color:var(--text); font-size:1.05rem;">Interview Session Complete</h4>
+                    <p style="margin:0; font-size:0.875rem; color:var(--text-2);">You have reviewed 5 questions in this interview session. Thank you for preserving vital institutional context!</p>
+                </div>
+                """).strip(), unsafe_allow_html=True)
+            else:
+                candidate_gaps = [g for g in open_gaps_list if g["id"] not in skipped_set]
+                if not candidate_gaps:
+                    st.info("You have reviewed all available open gaps in this session.")
+                else:
+                    curr_gap = candidate_gaps[0]
+                    curr_gap_id = curr_gap["id"]
+
+                    cache_key = f"gap_q_followup_{curr_gap_id}"
+                    if cache_key not in st.session_state:
+                        from utils.gemini_engine import generate_followup
+                        related = (profile.get("decisions", []) + profile.get("risks", []))[:3]
+                        st.session_state[cache_key] = generate_followup(
+                            curr_gap,
+                            related_claims=related,
+                            api_key=st.session_state.get("api_key", "")
+                        )
+                    followup_text = st.session_state[cache_key]
+
+                    with st.chat_message("assistant"):
+                        st.markdown(f"**Question regarding {curr_gap_id}:** {followup_text}")
+                        if curr_gap.get("why_unknown"):
+                            st.caption(f"*Context: {curr_gap['why_unknown']}*")
+
+                    typed_ans = st.text_area(
+                        "Your response (from memory):",
+                        key=f"interview_text_input_{curr_gap_id}",
+                        height=85,
+                        placeholder="Provide 2 to 3 sentences from personal memory..."
+                    )
+
+                    col_ans, col_unk, col_skp = st.columns([1, 1, 1])
+                    with col_ans:
+                        btn_ans = st.button("Answer", key=f"btn_act_ans_{curr_gap_id}", type="primary", use_container_width=True)
+                    with col_unk:
+                        btn_unk = st.button("I don't know", key=f"btn_act_unk_{curr_gap_id}", use_container_width=True)
+                    with col_skp:
+                        btn_skp = st.button("Skip", key=f"btn_act_skp_{curr_gap_id}", use_container_width=True)
+
+                    chat_input_val = st.chat_input("Or type your answer and press Enter...", key="interview_chat_input")
+
+                    ans_to_submit = chat_input_val if chat_input_val else (typed_ans if btn_ans else None)
+                    if ans_to_submit is not None:
+                        clean_val = ans_to_submit.strip()
+                        if not clean_val:
+                            st.error("Answer cannot be empty or whitespace-only.")
+                        else:
+                            try:
+                                add_gap_answer(
+                                    gap_id=curr_gap_id,
+                                    question_text=followup_text,
+                                    answer_text=clean_val,
+                                    status="answered",
+                                    author=employee,
+                                    grade="ATTESTED"
+                                )
+                                st.session_state.employee_gap_answers[curr_gap.get("question", followup_text)] = clean_val
+                                save_project_state(st.session_state)
+                                log_audit_entry(
+                                    st.session_state,
+                                    st.session_state.get("auth_username", "sarah"),
+                                    f"Answered knowledge gap {curr_gap_id}",
+                                    reason="ATTESTED leaver memory"
+                                )
+                                st.session_state["interview_session_count"] = session_answered + 1
+                                st.success(f"Response for {curr_gap_id} saved as ATTESTED.")
+                                st.rerun()
+                            except ValueError as ve:
+                                st.error(str(ve))
+
+                    if btn_unk:
+                        add_gap_answer(
+                            gap_id=curr_gap_id,
+                            question_text=followup_text,
+                            answer_text="I don't know",
+                            status="unknown",
+                            author=employee,
+                            grade="ATTESTED"
+                        )
+                        log_audit_entry(
+                            st.session_state,
+                            st.session_state.get("auth_username", "sarah"),
+                            f"Marked knowledge gap {curr_gap_id} as unknown",
+                            reason="Departing engineer indicated lack of context"
+                        )
+                        st.session_state["interview_session_count"] = session_answered + 1
+                        st.session_state.setdefault("interview_skipped_ids", set()).add(curr_gap_id)
+                        st.rerun()
+
+                    if btn_skp:
+                        add_gap_answer(
+                            gap_id=curr_gap_id,
+                            question_text=followup_text,
+                            answer_text="Skipped",
+                            status="skipped",
+                            author=employee,
+                            grade="ATTESTED"
+                        )
+                        log_audit_entry(
+                            st.session_state,
+                            st.session_state.get("auth_username", "sarah"),
+                            f"Skipped knowledge gap {curr_gap_id}",
+                            reason="Departing engineer skipped question"
+                        )
+                        st.session_state["interview_session_count"] = session_answered + 1
+                        st.session_state.setdefault("interview_skipped_ids", set()).add(curr_gap_id)
+                        st.rerun()
+
+            st.markdown("---")
+
         if unresolved:
             for k, q in enumerate(unresolved):
                 q_text = q.get("question", "")
@@ -1894,6 +2045,25 @@ elif st.session_state.page == "review":
                         st.markdown(f"- **{q_text}**<br>&nbsp;&nbsp;&nbsp;&nbsp;<b>Employee Context:</b> <i>{emp_ans}</i>", unsafe_allow_html=True)
                     else:
                         st.markdown(f"- **{q_text}** <i>(Unresolved — awaiting response)</i>", unsafe_allow_html=True)
+
+                try:
+                    attested_records = list_gap_answers(status="answered")
+                except Exception:
+                    attested_records = []
+                if attested_records:
+                    st.markdown("<br><div style='font-size:0.9rem; font-weight:700; color:var(--text); margin-bottom:6px;'>Leaver-Attested Gap Responses (From Memory):</div>", unsafe_allow_html=True)
+                    for ga in attested_records:
+                        g_q = ga.get("question_text") or ga.get("question", "")
+                        g_a = ga.get("answer_text") or ga.get("answer", "")
+                        g_auth = ga.get("author", "Sarah Chen")
+                        st.markdown(
+                            f"<div style='margin: 6px 0; padding: 10px 14px; background: rgba(59, 130, 246, 0.08); border-left: 3px solid #3b82f6; border-radius: 4px;'>"
+                            f"<span class='kb-pill kb-pill-info' style='font-weight:700; letter-spacing:0.5px; margin-right:8px;'>ATTESTED</span>"
+                            f"<b>{g_q}</b><br><span style='color:var(--text); font-size:0.9rem;'>&ldquo;{g_a}&rdquo;</span>"
+                            f"<br><span style='color:var(--text-2); font-size:0.75rem;'>Attested by {g_auth} &bull; Stored in audit memory</span>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
             elif section_id == "tribal":
                 if section_data:
                     for item in section_data:

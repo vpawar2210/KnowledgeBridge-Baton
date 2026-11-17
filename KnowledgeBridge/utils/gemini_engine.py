@@ -368,14 +368,112 @@ def generate_manager_handover(knowledge_profile: dict, employee_name: str, proje
     return _call_gemini(prompt, api_key, temperature=0.4, max_output_tokens=3000)
 
 
-def generate_newhire_handover(knowledge_profile: dict, employee_name: str, project_role: str, api_key: str) -> str:
-    """Generate a new hire technical handover document."""
+FOLLOWUP_INTERVIEW_PROMPT = """You are Baton AI, conducting an institutional knowledge interview with a departing senior engineer.
+We have identified an unresolved documentation gap.
+Generate ONE specific, focused follow-up question that the engineer can answer from personal memory in 2 to 3 sentences.
+
+UNRESOLVED KNOWLEDGE GAP:
+{gap_question}
+Detection Context: {gap_why}
+
+RELATED CLAIMS / SYSTEM EVIDENCE:
+{related_text}
+
+CRITICAL RULES:
+- Ask exactly ONE clear, direct question.
+- Do NOT repeat the gap text verbatim if you can make it more concrete, targeted, and operational (e.g. asking for specific runbook steps, dashboard names, escalation contacts, or commands).
+- The question must be answerable from engineer memory in 2 to 3 sentences.
+- Return ONLY the question string. No greeting, no conversational filler, no markdown.
+"""
+
+
+def generate_followup(gap: dict, related_claims: list = None, api_key: str = "") -> str:
+    """Generate ONE specific follow-up question for the leaver to answer in 2 to 3 sentences.
+    
+    Uses the same Gemini call path (_call_gemini).
+    If Gemini fails, times out or returns nothing, falls back to a plain question built
+    from the gap text, so the interview still works with no crash.
+    """
+    if isinstance(gap, dict):
+        gap_q = gap.get("question", "")
+        gap_why = gap.get("why_unknown", "")
+    else:
+        gap_q = str(gap)
+        gap_why = ""
+
+    fallback_question = gap_q.strip() if gap_q.strip() else "What operational context or guidance can you share regarding this component?"
+
+    if not api_key or not api_key.strip():
+        return fallback_question
+
+    claims_text = ""
+    if related_claims:
+        for c in related_claims[:3]:
+            if isinstance(c, dict):
+                claims_text += f"- {c.get('text', '')}\n"
+            else:
+                claims_text += f"- {str(c)}\n"
+    if not claims_text:
+        claims_text = "(No directly linked claims recorded)"
+
+    prompt = FOLLOWUP_INTERVIEW_PROMPT.format(
+        gap_question=gap_q,
+        gap_why=gap_why,
+        related_text=claims_text
+    )
+
+    try:
+        response = _call_gemini(prompt, api_key, temperature=0.3, max_output_tokens=250).strip()
+        cleaned = re.sub(r'^["\'`]+|["\'`]+$', '', response).strip()
+        if cleaned and len(cleaned) > 5:
+            if not cleaned.endswith("?"):
+                cleaned += "?"
+            return cleaned
+        return fallback_question
+    except Exception:
+        # Fall back gracefully to plain gap question on timeout or API error
+        return fallback_question
+
+
+def generate_newhire_handover(
+    knowledge_profile: dict,
+    employee_name: str,
+    project_role: str,
+    api_key: str,
+    attested_answers: list = None
+) -> str:
+    """Generate a new hire technical handover document.
+    
+    Includes an explicit section for 'Leaver-attested answers (from memory, not source-verified)'
+    built from status 'answered' rows.
+    """
     prompt = NEWHIRE_HANDOVER_PROMPT.format(
         knowledge_json=json.dumps(knowledge_profile, indent=2),
         employee_name=employee_name,
         project_role=project_role,
     )
-    return _call_gemini(prompt, api_key, temperature=0.4, max_output_tokens=3000)
+    handover_text = _call_gemini(prompt, api_key, temperature=0.4, max_output_tokens=3000)
+
+    # Fetch attested answers if not provided
+    if attested_answers is None:
+        try:
+            from utils.store import list_gap_answers
+            attested_answers = list_gap_answers(status="answered")
+        except Exception:
+            attested_answers = []
+
+    if attested_answers:
+        attested_section = "\n\n## Leaver-attested answers (from memory, not source-verified)\n\n"
+        attested_section += "> **Note:** The following responses were provided by the departing engineer from memory during the handover interview. They are categorized as **ATTESTED** (leaver memory) and are distinct from source-verified documentation.\n\n"
+        for item in attested_answers:
+            q = item.get("question_text") or item.get("question", "")
+            ans = item.get("answer_text") or item.get("answer", "")
+            grade = item.get("grade", "ATTESTED")
+            safe_ans = str(ans).replace('"', '\\"').replace("\n", " ")
+            attested_section += f"- **Q: {q}** `[{grade}]`\n  > \"{safe_ans}\"\n\n"
+        handover_text += attested_section
+
+    return handover_text
 
 
 def generate_employee_handover(
@@ -397,3 +495,70 @@ def generate_employee_handover(
         tribal_knowledge=json.dumps(tribal_knowledge, indent=2) if isinstance(tribal_knowledge, (dict, list)) else str(tribal_knowledge),
     )
     return _call_gemini(prompt, api_key, temperature=0.4, max_output_tokens=3000)
+
+
+FOLLOWUP_INTERVIEW_PROMPT = """You are Baton AI, conducting an institutional knowledge interview with a departing senior engineer.
+We have identified an unresolved documentation gap.
+Generate ONE specific, focused follow-up question that the engineer can answer from personal memory in 2 to 3 sentences.
+
+UNRESOLVED KNOWLEDGE GAP:
+{gap_question}
+Detection Context: {gap_why}
+
+RELATED CLAIMS / SYSTEM EVIDENCE:
+{related_text}
+
+CRITICAL RULES:
+- Ask exactly ONE clear, direct question.
+- Do NOT repeat the gap text verbatim if you can make it more concrete, targeted, and operational (e.g. asking for specific runbook steps, dashboard names, escalation contacts, or commands).
+- The question must be answerable from engineer memory in 2 to 3 sentences.
+- Return ONLY the question string. No greeting, no conversational filler, no markdown.
+"""
+
+
+def generate_followup(gap: dict, related_claims: list = None, api_key: str = "") -> str:
+    """Generate ONE specific follow-up question for the leaver to answer in 2 to 3 sentences.
+    
+    Uses the same Gemini call path (_call_gemini).
+    If Gemini fails, times out or returns nothing, falls back to a plain question built
+    from the gap text, so the interview still works with no crash.
+    """
+    if isinstance(gap, dict):
+        gap_q = gap.get("question", "")
+        gap_why = gap.get("why_unknown", "")
+    else:
+        gap_q = str(gap)
+        gap_why = ""
+
+    fallback_question = gap_q.strip() if gap_q.strip() else "What operational context or guidance can you share regarding this component?"
+
+    if not api_key or not api_key.strip():
+        return fallback_question
+
+    claims_text = ""
+    if related_claims:
+        for c in related_claims[:3]:
+            if isinstance(c, dict):
+                claims_text += f"- {c.get('text', '')}\n"
+            else:
+                claims_text += f"- {str(c)}\n"
+    if not claims_text:
+        claims_text = "(No directly linked claims recorded)"
+
+    prompt = FOLLOWUP_INTERVIEW_PROMPT.format(
+        gap_question=gap_q,
+        gap_why=gap_why,
+        related_text=claims_text
+    )
+
+    try:
+        response = _call_gemini(prompt, api_key, temperature=0.3, max_output_tokens=250).strip()
+        cleaned = re.sub(r'^["\'`]+|["\'`]+$', '', response).strip()
+        if cleaned and len(cleaned) > 5:
+            if not cleaned.endswith("?"):
+                cleaned += "?"
+            return cleaned
+        return fallback_question
+    except Exception:
+        # Fall back gracefully to plain gap question on timeout or API error
+        return fallback_question

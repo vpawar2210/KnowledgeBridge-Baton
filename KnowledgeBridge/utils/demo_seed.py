@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS confidential_meta (
     uploaded_by     TEXT NOT NULL DEFAULT '',
     uploaded_at     TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS gap_answers (
+    id            TEXT PRIMARY KEY,
+    gap_id        TEXT NOT NULL,
+    question_text TEXT NOT NULL,
+    answer_text   TEXT NOT NULL,
+    grade         TEXT NOT NULL DEFAULT 'ATTESTED',
+    status        TEXT NOT NULL,
+    author        TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gap_answers_gap_id ON gap_answers(gap_id);
 """
 
 
@@ -347,6 +358,33 @@ def _build_newhire_handover(dataset: Dict[str, Any]) -> str:
             lines.append(f"**Q: {q['question']}**")
             lines.append(f"A: {q['answer']}")
             lines.append("")
+
+    attested_list = []
+    try:
+        from utils.store import list_gap_answers
+        attested_list = list_gap_answers(status="answered")
+    except Exception:
+        attested_list = []
+
+    if not attested_list and "gap_answers" in dataset:
+        attested_list = [a for a in dataset.get("gap_answers", []) if a.get("status") == "answered"]
+
+    if attested_list:
+        lines += [
+            "## Leaver-attested answers (from memory, not source-verified)",
+            "",
+            "> **Note:** The following responses were provided by the departing engineer from memory during the handover interview. They are categorized as **ATTESTED** (leaver memory) and are distinct from source-verified documentation.",
+            "",
+        ]
+        for item in attested_list:
+            q_text = item.get("question_text") or item.get("question", "")
+            ans_text = item.get("answer_text") or item.get("answer", "")
+            grade = item.get("grade", "ATTESTED")
+            safe_ans = str(ans_text).replace('"', '\\"').replace("\n", " ")
+            lines.append(f"- **Q: {q_text}** `[{grade}]`")
+            lines.append(f'  > "{safe_ans}"')
+            lines.append("")
+
     return "\n".join(lines)
 
 

@@ -158,6 +158,18 @@ CREATE TABLE IF NOT EXISTS confidential_meta (
     uploaded_by     TEXT NOT NULL DEFAULT '',
     uploaded_at     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS gap_answers (
+    id            TEXT PRIMARY KEY,
+    gap_id        TEXT NOT NULL,
+    question_text TEXT NOT NULL,
+    answer_text   TEXT NOT NULL,
+    grade         TEXT NOT NULL DEFAULT 'ATTESTED',
+    status        TEXT NOT NULL,
+    author        TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gap_answers_gap_id ON gap_answers(gap_id);
 """
 
 
@@ -740,3 +752,234 @@ def register_confidential_meta(name: str, size_bytes: int,
             (cf_id, name, size_bytes, uploaded_by, ts)
         )
     return cf_id
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GAP INTERVIEW ENGINE (ATTESTED leaver memory)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CTRL_CHARS = set(range(0, 32)) - {9, 10, 13}  # allow tab, LF, CR
+
+def _clean_answer_text(text: str) -> str:
+    """Strip control characters and limit to 2000 characters."""
+    if not text:
+        return ""
+    cleaned = "".join(ch for ch in text if ord(ch) not in _CTRL_CHARS)
+    return cleaned.strip()[:2000]
+
+
+def add_gap_answer(
+    gap_id: str,
+    question_text: str,
+    answer_text: str,
+    status: str = "answered",
+    author: str = "Sarah Chen",
+    grade: str = "ATTESTED"
+) -> Dict[str, Any]:
+    """Store or update a gap answer with strict ATTESTED grade.
+    
+    Rules:
+    - Grade is ALWAYS 'ATTESTED', never 'VERIFIED' (even if 'VERIFIED' is passed).
+    - Saving the same gap again UPDATES it (no duplicate rows).
+    - Rejects empty or whitespace-only answers when status == 'answered'.
+    - Limits answer to 2000 characters and strips control characters.
+    """
+    valid_statuses = ("answered", "unknown", "skipped")
+    if status not in valid_statuses:
+        status = "answered"
+
+    # Enforce strict ATTESTED grade - leaver memory is never source-verified
+    enforced_grade = "ATTESTED"
+
+    cleaned_answer = _clean_answer_text(answer_text)
+
+    # Empty/whitespace check for answered status
+    if status == "answered":
+        if not cleaned_answer:
+            raise ValueError("Answer text cannot be empty or whitespace-only.")
+        final_answer = cleaned_answer
+    else:
+        final_answer = cleaned_answer if cleaned_answer else status.capitalize()
+
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    with _db() as con:
+        _ensure_schema(con)
+        # Check if record for this gap_id already exists
+        existing = con.execute("SELECT id FROM gap_answers WHERE gap_id = ?", (gap_id,)).fetchone()
+        if existing:
+            rec_id = existing[0]
+            con.execute(
+                """UPDATE gap_answers
+                   SET question_text = ?, answer_text = ?, grade = ?, status = ?, author = ?, created_at = ?
+                   WHERE gap_id = ?""",
+                (question_text, final_answer, enforced_grade, status, author, ts, gap_id)
+            )
+        else:
+            rec_id = str(uuid.uuid4())
+            con.execute(
+                """INSERT INTO gap_answers
+                   (id, gap_id, question_text, answer_text, grade, status, author, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (rec_id, gap_id, question_text, final_answer, enforced_grade, status, author, ts)
+            )
+
+    return {
+        "id": rec_id,
+        "gap_id": gap_id,
+        "question_text": question_text,
+        "answer_text": final_answer,
+        "grade": enforced_grade,
+        "status": status,
+        "author": author,
+        "created_at": ts
+    }
+
+
+def list_gap_answers(status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List all stored gap answers, optionally filtered by status ('answered', 'unknown', 'skipped')."""
+    with _db() as con:
+        _ensure_schema(con)
+        if status:
+            rows = con.execute(
+                """SELECT id, gap_id, question_text, answer_text, grade, status, author, created_at
+                   FROM gap_answers WHERE status = ? ORDER BY created_at ASC""",
+                (status,)
+            ).fetchall()
+        else:
+            rows = con.execute(
+                """SELECT id, gap_id, question_text, answer_text, grade, status, author, created_at
+                   FROM gap_answers ORDER BY created_at ASC"""
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def gap_progress(total_gaps: Optional[int] = None) -> Dict[str, Any]:
+    """Calculate progress of answered gaps.
+    
+    Returns a dict with:
+    - answered: total answered (base pre-answered + interview answered)
+    - interview_answered: answered in gap_answers table
+    - base_answered: answered in existing employee_gap_answers
+    - unknown: count of unknown answers
+    - skipped: count of skipped answers
+    - total: total number of gaps
+    - summary: e.g. '3 of 8 gaps answered'
+    """
+    with _db() as con:
+        _ensure_schema(con)
+        row = con.execute("SELECT COUNT(*) FROM gap_answers WHERE status = 'answered'").fetchone()
+        interview_answered = row[0] if row else 0
+
+        row_unk = con.execute("SELECT COUNT(*) FROM gap_answers WHERE status = 'unknown'").fetchone()
+        unknown_count = row_unk[0] if row_unk else 0
+
+        row_skip = con.execute("SELECT COUNT(*) FROM gap_answers WHERE status = 'skipped'").fetchone()
+        skipped_count = row_skip[0] if row_skip else 0
+
+        base_answered = 0
+        kv_row = con.execute("SELECT value FROM kv WHERE key = 'employee_gap_answers'").fetchone()
+        if kv_row and kv_row[0]:
+            try:
+                base_data = json.loads(kv_row[0])
+                if isinstance(base_data, dict):
+                    base_answered = sum(1 for v in base_data.values() if isinstance(v, str) and v.strip())
+            except Exception:
+                pass
+
+        if total_gaps is not None and total_gaps > 0:
+            total = total_gaps
+        else:
+            open_count = 5
+            kp_row = con.execute("SELECT value FROM kv WHERE key = 'knowledge_profile'").fetchone()
+            if kp_row and kp_row[0]:
+                try:
+                    kp = json.loads(kp_row[0])
+                    unres = kp.get("unresolved", [])
+                    if isinstance(unres, list) and unres:
+                        open_count = len(unres)
+                except Exception:
+                    pass
+            total = max(base_answered + open_count, 8)
+
+        total_answered = min(base_answered + interview_answered, total)
+        return {
+            "answered": total_answered,
+            "interview_answered": interview_answered,
+            "base_answered": base_answered,
+            "unknown": unknown_count,
+            "skipped": skipped_count,
+            "total": total,
+            "summary": f"{total_answered} of {total} gaps answered"
+        }
+
+
+def get_open_gaps() -> List[Dict[str, Any]]:
+    """Read open gap items dynamically from existing gap data.
+    
+    Reads from baton_mock_data.json and knowledge_profile['unresolved'].
+    Does NOT hardcode any IDs.
+    Excludes gaps that have already been answered (status == 'answered').
+    Gaps with status 'unknown' or 'skipped' remain open.
+    """
+    answered_ids = set()
+    answered_questions = set()
+    try:
+        with _db() as con:
+            _ensure_schema(con)
+            rows = con.execute("SELECT gap_id, question_text FROM gap_answers WHERE status = 'answered'").fetchall()
+            for r in rows:
+                if r[0]:
+                    answered_ids.add(r[0])
+                if r[1]:
+                    answered_questions.add(r[1])
+            kv_row = con.execute("SELECT value FROM kv WHERE key = 'employee_gap_answers'").fetchone()
+            if kv_row and kv_row[0]:
+                eg_ans = json.loads(kv_row[0])
+                if isinstance(eg_ans, dict):
+                    for qk, qv in eg_ans.items():
+                        if isinstance(qv, str) and qv.strip():
+                            answered_questions.add(qk)
+    except Exception:
+        pass
+
+    open_gaps = []
+    mock_file = BASE_DIR / "seed_data" / "harborline" / "baton_mock_data.json"
+    if mock_file.exists():
+        try:
+            with open(mock_file, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            questions = d.get("questions", [])
+            for q in questions:
+                q_id = q.get("id", f"Q-{len(open_gaps)+1:03d}")
+                q_text = q.get("question", "")
+                if q.get("status") == "open":
+                    if q_id not in answered_ids and q_text not in answered_questions:
+                        open_gaps.append({
+                            "id": q_id,
+                            "question": q_text,
+                            "source": q.get("source", ""),
+                            "why_unknown": "Identified as documentation gap in source materials."
+                        })
+        except Exception:
+            pass
+
+    if not open_gaps:
+        try:
+            with _db() as con:
+                row = con.execute("SELECT value FROM kv WHERE key = 'knowledge_profile'").fetchone()
+                if row and row[0]:
+                    kp = json.loads(row[0])
+                    for i, u in enumerate(kp.get("unresolved", [])):
+                        q_text = u.get("question", "")
+                        u_id = u.get("id") or u.get("gap_id") or f"GAP-{i+1:03d}"
+                        if u_id not in answered_ids and q_text not in answered_questions:
+                            open_gaps.append({
+                                "id": u_id,
+                                "question": q_text,
+                                "why_unknown": u.get("why_unknown", "")
+                            })
+        except Exception:
+            pass
+
+    return open_gaps
