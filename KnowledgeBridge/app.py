@@ -14,6 +14,7 @@ for _blocked_mod in ("pyarrow", "pyarrow._compute", "pyarrow.compute"):
     sys.modules.setdefault(_blocked_mod, None)
 os.environ.setdefault("BATON_SAFE_TABLES", "1")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
+import html
 import re
 import textwrap
 import time
@@ -87,71 +88,75 @@ st.set_page_config(
 THEMES = {
     "light": {
         "bg": "#F2E8DA",
-        "sidebar": "#F2E8DA",
-        "card": "#F2E8DA",
-        "surface": "#F2E8DA",
+        "sidebar": "#EDE2D0",
+        "card": "#FBF7EF",
+        "surface": "#FBF7EF",
         "subtle": "#E8DEC8",
-        "input_bg": "#F2E8DA",
-        "input_border": "rgba(59, 36, 24, 0.25)",
+        "input_bg": "#FBF7EF",
+        "input_border": "#8A7565",
         "border": "rgba(59, 36, 24, 0.15)",
         "text": "#3B2418",
-        "text2": "rgba(59, 36, 24, 0.70)",
-        "placeholder": "rgba(59, 36, 24, 0.45)",
+        "text2": "#725F52",
+        "placeholder": "#725F52",
         "disabled": "rgba(59, 36, 24, 0.35)",
-        "primary": "#8EC5FF",
-        "primary_hover": "#74B4F5",
-        "on_primary": "#3B2418",
-        "secondary_bg": "#F2E8DA",
-        "secondary_border": "rgba(59, 36, 24, 0.25)",
+        "primary": "#2B5F8A",
+        "primary_hover": "#234E73",
+        "on_primary": "#FFFFFF",
+        "secondary_bg": "#FBF7EF",
+        "secondary_border": "#8A7565",
         "secondary_text": "#3B2418",
-        "sidebar_active_bg": "#8EC5FF",
-        "sidebar_active_border": "#3B2418",
+        "sidebar_active_bg": "#DDE7EE",
+        "sidebar_active_border": "#2B5F8A",
         "sidebar_active_text": "#3B2418",
         "sidebar_hover_bg": "#E8DEC8",
         "sidebar_hover_text": "#3B2418",
-        "toggle_bg": "#F2E8DA",
-        "toggle_border": "rgba(59, 36, 24, 0.25)",
+        "toggle_bg": "#FBF7EF",
+        "toggle_border": "#8A7565",
         "toggle_text": "#3B2418",
         "draft_bg": "#E8DEC8",
         "draft_text": "#3B2418",
-        "ready_bg": "#8EC5FF",
-        "ready_text": "#3B2418",
-        "success": "#2E7D32",
-        "danger": "#9B1C1C",
+        "ready_bg": "#DDE7EE",
+        "ready_text": "#2B5F8A",
+        "success": "#2F6B3A",
+        "warning": "#8A5A00",
+        "danger": "#B3261E",
+        "info": "#2B5F8A",
     },
     "dark": {
         "bg": "#0F1420",
         "sidebar": "#0B0F19",
         "card": "#171E2E",
         "surface": "#171E2E",
-        "subtle": "#171E2E",
+        "subtle": "#1E2740",
         "input_bg": "#171E2E",
-        "input_border": "#5A6A85",
-        "border": "#5A6A85",
+        "input_border": "rgba(255, 255, 255, 0.35)",
+        "border": "rgba(255, 255, 255, 0.12)",
         "text": "#F8FAFC",
         "text2": "#CBD5E1",
-        "placeholder": "#64748B",
+        "placeholder": "#94A3B8",
         "disabled": "#64748B",
-        "primary": "#7C3AED",
-        "primary_hover": "#6D28D9",
-        "on_primary": "#FFFFFF",
+        "primary": "#8EC5FF",
+        "primary_hover": "#B3D8FF",
+        "on_primary": "#0F1420",
         "secondary_bg": "#171E2E",
-        "secondary_border": "#5A6A85",
+        "secondary_border": "rgba(255, 255, 255, 0.35)",
         "secondary_text": "#F8FAFC",
-        "sidebar_active_bg": "#3B2A73",
-        "sidebar_active_border": "#7C3AED",
+        "sidebar_active_bg": "#1C2F4A",
+        "sidebar_active_border": "#8EC5FF",
         "sidebar_active_text": "#F8FAFC",
-        "sidebar_hover_bg": "#241E47",
+        "sidebar_hover_bg": "#1E2740",
         "sidebar_hover_text": "#F8FAFC",
         "toggle_bg": "#171E2E",
-        "toggle_border": "#5A6A85",
+        "toggle_border": "rgba(255, 255, 255, 0.35)",
         "toggle_text": "#F8FAFC",
-        "draft_bg": "#F5DEB3",
-        "draft_text": "#7A4B00",
-        "ready_bg": "#3B2A73",
-        "ready_text": "#F8FAFC",
-        "success": "#6FBF73",
-        "danger": "#E57373",
+        "draft_bg": "#2A2312",
+        "draft_text": "#F2B84B",
+        "ready_bg": "#1C2F4A",
+        "ready_text": "#8EC5FF",
+        "success": "#6FCF8E",
+        "warning": "#F2B84B",
+        "danger": "#FF8A80",
+        "info": "#8EC5FF",
     },
 }
 
@@ -378,14 +383,15 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"], [data-testid="stExp
 --ready-bg: {t['ready_bg']};
 --ready-text: {t['ready_text']};
 --success: {t['success']};
+--warning: {t['warning']};
 --danger: {t['danger']};
+--info: {t['info']};
 --accent: {t['primary']};
 --accent-hover: {t['primary_hover']};
 --on-accent: {t['on_primary']};
 --nav-active: {t['sidebar_active_bg']};
 --nav-hover-text: {t['sidebar_hover_text']};
 --link: {t['primary']};
---warning: {t['draft_bg']};
 --warning-bg: {t['subtle']};
 --error: {t['danger']};
 --surface-2: {t['subtle']};
@@ -551,6 +557,13 @@ a:hover {{ color: var(--text) !important; text-decoration-color: var(--primary-h
 .kb-approval-progress {{ display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--subtle); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }}
 .kb-approval-progress-label {{ font-size: 13px; font-weight: 600; color: var(--text); }}
 .kb-approval-progress-count {{ font-size: 14px; font-weight: 700; color: var(--text); }}
+/* Type scale — tested on Streamlit 1.67.0 — targets hand-built HTML helpers only */
+.kb-title {{ font-size: 28px; line-height: 1.29; font-weight: 600; color: var(--text); }}
+.kb-h2 {{ font-size: 20px; line-height: 1.4; font-weight: 600; color: var(--text); }}
+.kb-ui {{ font-size: 14px; line-height: 1.43; color: var(--text); }}
+.kb-caption {{ font-size: 13px; line-height: 1.38; color: var(--text-2); }}
+.kb-micro {{ font-size: 12px; line-height: 1.33; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-2); }}
+.kb-mono {{ font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.92em; }}
 </style>""").strip()
     st.markdown(css, unsafe_allow_html=True)
 
@@ -586,7 +599,8 @@ def icon_svg(name: str, size: int = 14) -> str:
 # ─── COMPONENT RENDER HELPERS ─────────────────────────────────────────────────
 def render_file_row(filename: str, size_bytes: int) -> str:
     """Clean file row with extension chip and formatted size."""
-    ext = filename.rsplit(".", 1)[-1].upper() if "." in filename else "DOC"
+    safe_name = html.escape(str(filename))
+    ext = html.escape(filename.rsplit(".", 1)[-1].upper() if "." in filename else "DOC")
     if size_bytes < 1024:
         size_str = f"{size_bytes} B"
     elif size_bytes < 1024 * 1024:
@@ -594,13 +608,13 @@ def render_file_row(filename: str, size_bytes: int) -> str:
     else:
         size_str = f"{size_bytes / (1024*1024):.1f} MB"
     return textwrap.dedent(f"""
-    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px;font-size:13px;color:var(--text);">
+    <div style="display:flex;align-items:center;justify-content:space-between;background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px;" class="kb-ui">
         <div style="display:flex;align-items:center;gap:8px;">
             {icon_svg("file", 13)}
-            <span style="font-family:monospace;font-size:11px;font-weight:600;background:var(--surface);color:var(--text);padding:1px 5px;border-radius:3px;border:1px solid var(--border);">{ext}</span>
-            <span style="font-weight:500;">{filename}</span>
+            <span class="kb-mono kb-micro" style="background:var(--surface);color:var(--text);padding:1px 5px;border-radius:3px;border:1px solid var(--border);">{ext}</span>
+            <span style="font-weight:500;">{safe_name}</span>
         </div>
-        <span style="font-size:12px;color:var(--text-2);">{size_str}</span>
+        <span class="kb-caption">{size_str}</span>
     </div>
     """).strip()
 
@@ -609,51 +623,59 @@ def render_citation(source: str, excerpt: str) -> str:
     """Structured citation block: thin left border, monospace 13px text, file name above as a small label."""
     if not excerpt:
         return ""
-    clean_excerpt = redact_sensitive_info(excerpt)
+    safe_source = html.escape(str(source))
+    # redact_sensitive_info may return any string; escape the result before embedding in HTML
+    clean_excerpt = html.escape(redact_sensitive_info(excerpt))
     return textwrap.dedent(f"""
     <div style="border-left:2px solid var(--border);padding:3px 0 3px 10px;margin:6px 0;background:transparent;">
-        <div style="font-size:11px;font-family:monospace;color:var(--text-2);margin-bottom:2px;">{source}</div>
-        <div style="font-size:13px;font-family:monospace;color:var(--text);line-height:1.45;">"{clean_excerpt}"</div>
+        <div class="kb-mono kb-micro" style="color:var(--text-2);margin-bottom:2px;">{safe_source}</div>
+        <div class="kb-mono kb-caption" style="color:var(--text);line-height:1.45;">"{clean_excerpt}"</div>
     </div>
     """).strip()
 
 
 def render_audit_entry(entry: dict) -> str:
     """Structured audit log row with monospace timestamp."""
-    status_color = "var(--text)"
-    action_text = entry.get('action', '')
+    safe_ts = html.escape(str(entry.get('timestamp', '')))
+    safe_who = html.escape(str(entry.get('who', '')))
+    safe_action = html.escape(str(entry.get('action', '')))
+    safe_reason = html.escape(str(entry.get('reason', '')))
     return textwrap.dedent(f"""
-    <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;">
-        <span style="font-family:monospace;font-size:12px;color:var(--text-2);width:150px;">{entry.get('timestamp', '')}</span>
-        <span style="font-weight:600;width:100px;">{entry.get('who', '')}</span>
-        <span style="font-weight:500;width:180px;">{action_text}</span>
-        <span style="color:var(--text-2);flex:1;">{entry.get('reason', '')}</span>
+    <div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid var(--border);" class="kb-ui">
+        <span class="kb-mono kb-micro" style="color:var(--text-2);width:150px;">{safe_ts}</span>
+        <span style="font-weight:600;width:100px;">{safe_who}</span>
+        <span style="font-weight:500;width:180px;">{safe_action}</span>
+        <span style="color:var(--text-2);flex:1;">{safe_reason}</span>
     </div>
     """).strip()
 
 
 def render_receipt_card(name: str, timestamp: str, project: str, employee: str) -> str:
     """Post-acknowledgment signed receipt card."""
+    safe_name = html.escape(str(name))
+    safe_ts = html.escape(str(timestamp))
+    safe_project = html.escape(str(project))
+    safe_employee = html.escape(str(employee))
     return textwrap.dedent(f"""
     <div class="kb-receipt-card">
         <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:10px;">
             <span class="kb-pill kb-pill-success">Receipt acknowledged</span>
-            <span style="font-family:monospace;font-size:12px;color:var(--text-2);">{timestamp}</span>
+            <span class="kb-mono kb-micro" style="color:var(--text-2);">{safe_ts}</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
-            <div style="display:flex;justify-content:space-between;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;" class="kb-caption">
                 <span style="color:var(--text-2);">Successor</span>
-                <span style="color:var(--text);font-weight:500;">{name}</span>
+                <span style="color:var(--text);font-weight:500;">{safe_name}</span>
             </div>
-            <div style="display:flex;justify-content:space-between;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;" class="kb-caption">
                 <span style="color:var(--text-2);">Knowledge holder</span>
-                <span style="color:var(--text);font-weight:500;">{employee}</span>
+                <span style="color:var(--text);font-weight:500;">{safe_employee}</span>
             </div>
-            <div style="display:flex;justify-content:space-between;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;" class="kb-caption">
                 <span style="color:var(--text-2);">Project scope</span>
-                <span style="color:var(--text);font-weight:500;">{project}</span>
+                <span style="color:var(--text);font-weight:500;">{safe_project}</span>
             </div>
-            <div style="display:flex;justify-content:space-between;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;" class="kb-caption">
                 <span style="color:var(--text-2);">Status</span>
                 <span style="font-weight:500;">Handover complete</span>
             </div>
@@ -687,10 +709,12 @@ def confidence_badge(confidence: str) -> str:
 
 def render_stat_card(label: str, number: str) -> str:
     """Clean flat metric card."""
+    safe_label = html.escape(str(label))
+    safe_number = html.escape(str(number))
     return textwrap.dedent(f"""
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px 16px;margin-bottom:8px;">
-        <div style="font-size:12px;color:var(--text-2);text-transform:uppercase;margin-bottom:4px;">{label}</div>
-        <div style="font-size:20px;font-weight:600;color:var(--text);">{number}</div>
+        <div class="kb-micro" style="color:var(--text-2);text-transform:uppercase;margin-bottom:4px;">{safe_label}</div>
+        <div class="kb-h2" style="color:var(--text);">{safe_number}</div>
     </div>
     """).strip()
 
@@ -2172,7 +2196,7 @@ elif st.session_state.page == "review":
                         g_a = ga.get("answer_text") or ga.get("answer", "")
                         g_auth = ga.get("author", "Sarah Chen")
                         st.markdown(
-                            f"<div style='margin: 6px 0; padding: 10px 14px; background: rgba(59, 130, 246, 0.08); border-left: 3px solid #3b82f6; border-radius: 4px;'>"
+                            f"<div style='margin: 6px 0; padding: 10px 14px; background: var(--subtle); border-left: 3px solid var(--info); border-radius: 4px;'>"
                             f"<span class='kb-pill kb-pill-info' style='font-weight:700; letter-spacing:0.5px; margin-right:8px;'>ATTESTED</span>"
                             f"<b>{g_q}</b><br><span style='color:var(--text); font-size:0.9rem;'>&ldquo;{g_a}&rdquo;</span>"
                             f"<br><span style='color:var(--text-2); font-size:0.75rem;'>Attested by {g_auth} &bull; Stored in audit memory</span>"
