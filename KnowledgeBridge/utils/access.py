@@ -2,9 +2,22 @@
 
 import time
 import uuid
+import re
 from typing import Dict, Any, List, Optional
 import streamlit as st
 from utils.store import save_project_state, log_audit_entry, modify_project_state
+from utils.crypto import REDACTION_PLACEHOLDER
+
+CONFIDENTIAL_DOC_IDS = {
+    "DOC-TRB-008",
+    "DOC-FIN-009",
+    "DOC-BCP-010",
+    "DOC-MON-011",
+}
+CONFIDENTIAL_NOTE_IDS = {
+    "NOTE-004",
+}
+CONFIDENTIAL_SOURCES = CONFIDENTIAL_DOC_IDS | CONFIDENTIAL_NOTE_IDS
 
 # Request types and readable labels
 REQUEST_LABELS = {
@@ -90,7 +103,7 @@ def get_member_grants(state: Dict[str, Any], member_id: str) -> List[str]:
     return list(grants_dict.get(member_id, []))
 
 
-def can_read(member: Dict[str, Any], is_confidential: bool = False, state: Optional[Dict[str, Any]] = None) -> bool:
+def can_read(member: Dict[str, Any], is_confidential: bool = False, state: Optional[Dict[str, Any]] = None, file_id: Optional[str] = None) -> bool:
     """Check read permission."""
     role = member.get("role")
     if role == "Manager":
@@ -103,7 +116,11 @@ def can_read(member: Dict[str, Any], is_confidential: bool = False, state: Optio
         return False
     uid = member.get("id") or member.get("username", "")
     grants = get_member_grants(state, uid)
-    return "confidential_read" in grants or "confidential_write" in grants
+    if "confidential_read" in grants or "confidential_write" in grants:
+        return True
+    if file_id and (file_id in grants or f"confidential_read:{file_id}" in grants):
+        return True
+    return False
 
 
 def can_write(member: Dict[str, Any], is_confidential: bool = False, state: Optional[Dict[str, Any]] = None) -> bool:
@@ -122,6 +139,150 @@ def can_write(member: Dict[str, Any], is_confidential: bool = False, state: Opti
         return "normal_write" in grants
     else:
         return "confidential_write" in grants
+
+
+def can_read_file(member: Optional[Dict[str, Any]], file_id: str, file_sensitivity: str = "normal", state: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if member can read a specific file.
+    
+    Rules:
+    - None user -> False (fail-closed).
+    - Manager and Sarah (Employee) -> True.
+    - Non-confidential file -> True.
+    - Confidential file -> True only if member has broad grant or per-file grant for file_id.
+    """
+    if not member:
+        return False
+    role = member.get("role")
+    uid = member.get("id") or member.get("username", "")
+    if role in ("Manager", "Employee") or uid in ("manager", "sarah"):
+        return True
+
+    is_conf = (file_sensitivity == "confidential" or file_id in CONFIDENTIAL_SOURCES)
+    if not is_conf:
+        return True
+
+    if state is None and hasattr(st, "session_state"):
+        state = st.session_state
+
+    if state is not None:
+        grants = get_member_grants(state, uid)
+        if "confidential_read" in grants or "confidential_write" in grants:
+            return True
+        if file_id in grants or f"confidential_read:{file_id}" in grants:
+            return True
+
+    return False
+
+
+def redact_secrets(s: str) -> str:
+    """Redact keys, tokens, and passwords from text."""
+    if not s:
+        return ""
+    # 1. api_key=..., password: ..., token: ...
+    s = re.sub(r'(?i)\b(api[_-]?key)\s*[:=]\s*([\'"][^\'"\r\n]+[\'"]|[^\s,;]+)', r'\1=' + REDACTION_PLACEHOLDER, s)
+    s = re.sub(r'(?i)\b(password|token)\s*[:=]\s*([\'"][^\'"\r\n]+[\'"]|[^\s,;]+)', r'\1: ' + REDACTION_PLACEHOLDER, s)
+    # 2. Known key prefixes
+    s = re.sub(r'\b(AIza[0-9A-Za-z-_]{20,}|ghp_[0-9A-Za-z]{20,}|sk-[0-9A-Za-z-_]{20,}|AQ\.[0-9A-Za-z-_]{10,})\b', REDACTION_PLACEHOLDER, s)
+    # 3. Long tokens (40+ characters alphanumeric/symbols without whitespace)
+    s = re.sub(r'(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])', REDACTION_PLACEHOLDER, s)
+    return s
+
+
+def redact_confidential_fields(s: str) -> str:
+    """Redact emails, phone numbers, and currency amounts in Harborline style."""
+    if not s:
+        return ""
+    # Emails
+    s = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', REDACTION_PLACEHOLDER, s)
+    # Phone numbers
+    phone_pattern = r'(\+\d{1,3}[-.\s]?(?:\(?\d{2,5}\)?[-.\s]?)?\d{3,5}[-.\s]?\d{3,5}\b|\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b\d{5}[-.\s]\d{5}\b)'
+    s = re.sub(phone_pattern, REDACTION_PLACEHOLDER, s)
+    # Currency / amounts in Harborline style (e.g. INR 500,000, 500000.01, $50,000)
+    money_pattern = r'(?:INR\s*|Rs\.?\s*|\$)\s*[\d,]+(?:\.\d{1,2})?|\b[\d,]+\.\d{2}\s*(?:INR|USD)?\b'
+    s = re.sub(money_pattern, REDACTION_PLACEHOLDER, s)
+    return s
+
+
+def redact(
+    text: str,
+    user_role: Optional[str] = None,
+    user: Optional[Dict[str, Any]] = None,
+    grants: Optional[Any] = None,
+    file_sensitivity: str = "normal",
+    file_id: Optional[str] = None,
+) -> str:
+    """Redact text based on role, sensitivity, and grants.
+    
+    Rules:
+    - Manager and Sarah: full text, as before.
+    - Marcus / Successor WITHOUT an approved grant for that specific file:
+      the confidential document body, confidential claim quotes and confidential excerpts
+      are replaced by REDACTION_PLACEHOLDER.
+    - Marcus / Successor WITH an approved grant for that specific file:
+      full text for that file ONLY (secrets still redacted).
+    - Field-level patterns for secrets (keys, tokens, passwords) apply to ALL text
+      returned to the successor, even normal text.
+    - All other field patterns (email, phone, amounts) apply ONLY to confidential-labelled text.
+    - If no user is passed, default to MOST RESTRICTED behavior (successor view without grant).
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+
+    # Resolve role and user id
+    role = user_role
+    uid = None
+    if user is not None:
+        if not role:
+            role = user.get("role")
+        uid = user.get("id") or user.get("username")
+
+    if not role:
+        role = "Successor"  # Default to most restricted
+
+    # Manager and Sarah get full text
+    if role in ("Manager", "Employee") or uid in ("manager", "sarah"):
+        return text
+
+    # Successor / Joinee logic:
+    is_conf = (
+        file_sensitivity == "confidential"
+        or (file_id and file_id in CONFIDENTIAL_SOURCES)
+    )
+
+    # Check grant for this file
+    has_grant = False
+    if uid:
+        user_grants = []
+        if isinstance(grants, list):
+            user_grants = grants
+        elif isinstance(grants, dict):
+            user_grants = grants.get(uid, [])
+        elif hasattr(st, "session_state") and hasattr(st.session_state, "get"):
+            user_grants = st.session_state.get("grants", {}).get(uid, [])
+
+        if user_grants:
+            if "confidential_read" in user_grants or "confidential_write" in user_grants:
+                has_grant = True
+            elif file_id and (file_id in user_grants or f"confidential_read:{file_id}" in user_grants):
+                has_grant = True
+        else:
+            try:
+                from utils.store import can_user_read_file
+                has_grant = can_user_read_file(user, file_id)
+            except Exception:
+                has_grant = False
+
+    if is_conf:
+        if not has_grant:
+            return REDACTION_PLACEHOLDER
+        # Has grant for this file: full text for this file, but secret patterns still apply
+        return redact_secrets(text)
+    else:
+        # Normal text: field-level patterns for secrets apply to ALL text returned to successor
+        return redact_secrets(text)
+
 
 
 def get_effective_access(member: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -215,7 +376,7 @@ def add_notification(state: Dict[str, Any], to_id: str, kind: str, message: str)
     return notif
 
 
-def create_request(state: Dict[str, Any], member: Dict[str, Any], req_type: str, reason: str) -> Dict[str, Any]:
+def create_request(state: Dict[str, Any], member: Dict[str, Any], req_type: str, reason: str, file_id: Optional[str] = None) -> Dict[str, Any]:
     """Member creates an access request using atomic read-modify-write."""
     req = {
         "id": str(uuid.uuid4())[:8],
@@ -229,6 +390,7 @@ def create_request(state: Dict[str, Any], member: Dict[str, Any], req_type: str,
         "decided_at": None,
         "decided_by": None,
         "decision_comment": "",
+        "file_id": file_id,
     }
     readable_type = REQUEST_LABELS.get(req_type, req_type)
     reason_text = reason.strip() if reason.strip() else "none given"
@@ -275,20 +437,34 @@ def decide_request(state: Dict[str, Any], manager: Dict[str, Any], request_id: s
 
         requester_id = req["requester_id"]
         req_type = req["type"]
+        file_id = req.get("file_id")
         readable_type = REQUEST_LABELS.get(req_type, req_type)
+        if file_id:
+            readable_type += f" for file {file_id}"
 
         if approve:
             if "grants" not in d:
                 d["grants"] = {}
             cur_grants = set(d["grants"].get(requester_id, []))
-            cur_grants.add(req_type)
-            if req_type == "confidential_write":
-                cur_grants.add("confidential_read")
+            if file_id:
+                cur_grants.add(f"confidential_read:{file_id}")
+                cur_grants.add(file_id)
+            else:
+                cur_grants.add(req_type)
+                if req_type == "confidential_write":
+                    cur_grants.add("confidential_read")
             d["grants"][requester_id] = list(cur_grants)
 
             notif_msg = f"Your request for {readable_type} was approved by the manager."
             action_msg = f"approved request for {readable_type}"
         else:
+            if "grants" in d and requester_id in d["grants"]:
+                cur_grants = set(d["grants"][requester_id])
+                cur_grants.discard(req_type)
+                if file_id:
+                    cur_grants.discard(f"confidential_read:{file_id}")
+                    cur_grants.discard(file_id)
+                d["grants"][requester_id] = list(cur_grants)
             comment_text = comment.strip() if comment.strip() else "none"
             notif_msg = f"Your request for {readable_type} was denied. Comment: {comment_text}."
             action_msg = f"denied request for {readable_type}"

@@ -31,6 +31,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from utils.crypto import encrypt_text
+
 ROOT = Path(__file__).resolve().parent.parent
 DATASET_ROOT = ROOT / "seed_data" / "harborline"
 DATASET_PATH = DATASET_ROOT / "baton_mock_data.json"
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE TABLE IF NOT EXISTS grants (
     member_id   TEXT NOT NULL,
     grant_type  TEXT NOT NULL,
+    file_id     TEXT DEFAULT NULL,
     PRIMARY KEY (member_id, grant_type)
 );
 CREATE TABLE IF NOT EXISTS notifications (
@@ -96,7 +99,8 @@ CREATE TABLE IF NOT EXISTS access_requests (
     created_at       TEXT NOT NULL,
     decided_at       TEXT,
     decided_by       TEXT,
-    decision_comment TEXT NOT NULL DEFAULT ''
+    decision_comment TEXT NOT NULL DEFAULT '',
+    file_id          TEXT DEFAULT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +119,8 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes      INTEGER NOT NULL DEFAULT 0,
     sha256          TEXT NOT NULL DEFAULT '',
     extracted_text  TEXT,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    sensitivity     TEXT NOT NULL DEFAULT 'normal'
 );
 CREATE TABLE IF NOT EXISTS confidential_meta (
     id              TEXT PRIMARY KEY,
@@ -138,18 +143,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_gap_answers_gap_id ON gap_answers(gap_id);
 """
 
 
-def _open_db(timeout: float = 10.0) -> sqlite3.Connection:
+def _open_db(timeout: float = 30.0) -> sqlite3.Connection:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(DB_FILE), timeout=timeout, check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout = 30000")
     con.execute("PRAGMA foreign_keys=ON")
     return con
 
 
 def _ensure_schema(con: sqlite3.Connection) -> None:
     con.executescript(_SCHEMA_SQL)
+    try:
+        con.execute("ALTER TABLE files ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'normal'")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE grants ADD COLUMN file_id TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE access_requests ADD COLUMN file_id TEXT DEFAULT NULL")
+    except Exception:
+        pass
     con.commit()
 
 
@@ -185,16 +203,23 @@ def _split_findings(findings: List[Dict[str, Any]]):
     decisions: List[Dict[str, Any]] = []
     risks: List[Dict[str, Any]] = []
     n = len(findings)
+    conf_sources = {"NOTE-004", "NOTE-002", "DOC-TRB-008", "DOC-FIN-009", "DOC-BCP-010", "DOC-MON-011"}
     for idx, finding in enumerate(findings):
         source = (finding.get("source_document_id")
                   or finding.get("source_note_id")
                   or "employee_note")
+        is_conf = (source in conf_sources or finding.get("classification") == "confidential")
+        raw_text = finding.get("summary") or finding.get("title") or "Finding"
+        stored_text = encrypt_text(raw_text) if is_conf else raw_text
+        raw_quote = finding.get("source_quote") or ""
+        stored_quote = encrypt_text(raw_quote) if (is_conf and raw_quote) else raw_quote
         item = {
-            "text": finding.get("summary") or finding.get("title") or "Finding",
+            "text": stored_text,
             "source": source,
             "source_type": "file" if finding.get("source_document_id") else "note",
             "confidence": (finding.get("confidence") or "medium").upper(),
-            "excerpt": finding.get("source_quote") or "",
+            "excerpt": stored_quote,
+            "sensitivity": "confidential" if is_conf else "normal",
         }
         if idx < n // 2:
             decisions.append(item)
@@ -208,8 +233,9 @@ def _build_tribal_knowledge(dataset: Dict[str, Any]) -> List[Dict[str, str]]:
     for note in dataset.get("employee_notes", []):
         title = note.get("title", "Employee note")
         content = note.get("content", "")
-        if note.get("classification") == "confidential":
-            category = "Warning"
+        if note.get("classification") == "confidential" or note.get("id") in ("NOTE-004", "NOTE-002"):
+            category = "Warning" if (note.get("classification") == "confidential" or note.get("id") == "NOTE-004") else "Process"
+            content = encrypt_text(content)
         elif "reconciliation" in title.lower() or "handover" in title.lower():
             category = "Process"
         else:
@@ -461,13 +487,27 @@ def _materialise_files(con: sqlite3.Connection, dataset: Dict[str, Any]) -> None
                     "INSERT INTO confidential_meta(id,name,size_bytes,uploaded_by,uploaded_at) VALUES(?,?,?,?,?)",
                     (doc_id, title, len(file_bytes), "sarah", created_at),
                 )
+            raw_text = None
+            if src.suffix in (".md", ".csv", ".txt"):
+                try:
+                    raw_text = src.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    raw_text = None
+            enc_text = encrypt_text(raw_text) if raw_text else None
+            if con.execute("SELECT id FROM files WHERE id=?", (doc_id,)).fetchone() is None:
+                con.execute(
+                    "INSERT INTO files(id,original_name,stored_name,classification,"
+                    "owner_id,owner_name,size_bytes,sha256,extracted_text,created_at,sensitivity) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (doc_id, src.name, stored, "confidential",
+                     "sarah", owner, len(file_bytes), sha, enc_text, created_at, "confidential"),
+                )
         else:
             if con.execute("SELECT id FROM files WHERE id=?", (doc_id,)).fetchone() is None:
                 con.execute(
                     "INSERT INTO files(id,original_name,stored_name,classification,"
-                    "owner_id,owner_name,size_bytes,sha256,extracted_text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    "owner_id,owner_name,size_bytes,sha256,extracted_text,created_at,sensitivity) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (doc_id, src.name, stored, "normal",
-                     "sarah", owner, len(file_bytes), sha, None, created_at),
+                     "sarah", owner, len(file_bytes), sha, None, created_at, "normal"),
                 )
 
     # 2 historical versions
@@ -491,10 +531,10 @@ def _materialise_files(con: sqlite3.Connection, dataset: Dict[str, Any]) -> None
         if con.execute("SELECT id FROM files WHERE id=?", (ver_id,)).fetchone() is None:
             con.execute(
                 "INSERT INTO files(id,original_name,stored_name,classification,"
-                "owner_id,owner_name,size_bytes,sha256,extracted_text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "owner_id,owner_name,size_bytes,sha256,extracted_text,created_at,sensitivity) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (ver_id, src.name, stored, "normal",
                  "sarah", f"Historical v{ver_label} of {parent_id}",
-                 len(file_bytes), sha, None, created_at),
+                 len(file_bytes), sha, None, created_at, "normal"),
             )
 
 
@@ -519,8 +559,8 @@ def _seed_all(con: sqlite3.Connection, dataset: Dict[str, Any], completed: bool)
             "contacts": True,
         }
         manager_handover = _build_manager_handover(dataset)
-        newhire_handover = _build_newhire_handover(dataset)
-        employee_handover = _build_employee_handover(dataset)
+        newhire_handover = encrypt_text(_build_newhire_handover(dataset))
+        employee_handover = encrypt_text(_build_employee_handover(dataset))
         handovers_run = 1
         successor_notes = [
             {
@@ -561,7 +601,9 @@ def _seed_all(con: sqlite3.Connection, dataset: Dict[str, Any], completed: bool)
 
     all_sources = [
         {
-            "content": f"{doc.get('title', 'Document')} — {doc.get('owner', 'owner')}",
+            "content": encrypt_text(f"{doc.get('title', 'Document')} — {doc.get('owner', 'owner')}")
+                       if doc.get("classification") == "confidential"
+                       else f"{doc.get('title', 'Document')} — {doc.get('owner', 'owner')}",
             "source": doc.get("path", "seed_files"),
             "source_type": "file",
         }
@@ -674,16 +716,18 @@ def ensure_demo_database_seeded(
 ) -> None:
     """Write the Harborline demo state into SQLite. Idempotent."""
     dataset = _load_dataset()
+    target_sentinel = _SEED_VAL_COMPLETE if completed else _SEED_VAL_START
     con = _open_db()
     try:
+        if not force_reset:
+            try:
+                current_sentinel = _kv_get(con, _SEED_KEY)
+                if current_sentinel is not None:
+                    return  # already in a valid seeded state
+            except Exception:
+                pass
+
         _ensure_schema(con)
-
-        current_sentinel = _kv_get(con, _SEED_KEY)
-        target_sentinel = _SEED_VAL_COMPLETE if completed else _SEED_VAL_START
-
-        if not force_reset and current_sentinel == target_sentinel:
-            return  # already in the right state
-
         _wipe_all_tables(con)
         _seed_all(con, dataset, completed=completed)
         _kv_set(con, _SEED_KEY, target_sentinel)

@@ -7,6 +7,7 @@ with automatic REST fallback to ensure seamless compatibility with AQ. keys.
 import json
 import re
 import time
+from typing import Optional
 import requests
 from google import genai
 from google.genai import types
@@ -319,23 +320,42 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
     )
 
 
-def analyze_sources(texts: list[dict], api_key: str) -> dict:
+def analyze_sources(texts: list[dict], api_key: str, user: Optional[dict] = None) -> dict:
     """
     Analyze a list of source texts and extract structured knowledge.
 
     Args:
         texts: List of dicts with keys: content, source, source_type
         api_key: Gemini API key (supports AQ. keys)
+        user: Optional user dict for role-based pre-AI filtering
 
     Returns:
         Structured knowledge profile dict
     """
+    from utils.access import redact, can_read_file, CONFIDENTIAL_SOURCES
+    from utils.crypto import REDACTION_PLACEHOLDER
+
     # Build the sources text block
     sources_text = ""
     for i, t in enumerate(texts, 1):
         icon = {"file": "📁", "github": "🐙", "text": "📝"}.get(t.get("source_type", "text"), "📄")
-        sources_text += f"\n\n--- SOURCE {i}: {icon} [{t['source_type'].upper()}] {t['source']} ---\n"
-        content = t["content"]
+        src_name = t.get("source", "")
+        sources_text += f"\n\n--- SOURCE {i}: {icon} [{t.get('source_type', 'text').upper()}] {src_name} ---\n"
+        content = t.get("content", "")
+
+        is_conf = (
+            t.get("classification") == "confidential"
+            or t.get("sensitivity") == "confidential"
+            or src_name in CONFIDENTIAL_SOURCES
+            or any(cid in str(src_name) for cid in ("DOC-TRB-008", "DOC-FIN-009", "DOC-BCP-010", "DOC-MON-011", "NOTE-004"))
+        )
+
+        if is_conf and not can_read_file(user, src_name, file_sensitivity="confidential"):
+            content = REDACTION_PLACEHOLDER
+        else:
+            sens = "confidential" if is_conf else "normal"
+            content = redact(content, user=user, file_sensitivity=sens, file_id=src_name)
+
         if len(content) > 25000:
             content = content[:25000] + "\n[Source truncated: only the first 25000 characters were analyzed]\n"
         sources_text += content

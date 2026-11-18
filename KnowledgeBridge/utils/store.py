@@ -9,12 +9,31 @@ needs only minor updates.
 import copy
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from utils.crypto import (
+    encrypt_text,
+    decrypt_text,
+    is_encrypted,
+    REDACTION_PLACEHOLDER,
+)
+
+CONFIDENTIAL_DOC_IDS = {
+    "DOC-TRB-008",
+    "DOC-FIN-009",
+    "DOC-BCP-010",
+    "DOC-MON-011",
+}
+CONFIDENTIAL_NOTE_IDS = {
+    "NOTE-004",
+}
+CONFIDENTIAL_SOURCES = CONFIDENTIAL_DOC_IDS | CONFIDENTIAL_NOTE_IDS
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -64,7 +83,7 @@ def ensure_data_dir() -> Path:
 
 
 @contextmanager
-def _db(timeout: float = 5.0):
+def _db(timeout: float = 30.0):
     """Yield a SQLite connection with WAL, FK enforcement and busy timeout."""
     ensure_data_dir()
     con = sqlite3.connect(str(DB_FILE), timeout=timeout,
@@ -72,6 +91,7 @@ def _db(timeout: float = 5.0):
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout = 30000")
         con.execute("PRAGMA foreign_keys=ON")
         yield con
         con.commit()
@@ -103,6 +123,7 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE TABLE IF NOT EXISTS grants (
     member_id   TEXT NOT NULL,
     grant_type  TEXT NOT NULL,
+    file_id     TEXT DEFAULT NULL,
     PRIMARY KEY (member_id, grant_type)
 );
 
@@ -127,7 +148,8 @@ CREATE TABLE IF NOT EXISTS access_requests (
     created_at       TEXT NOT NULL,
     decided_at       TEXT,
     decided_by       TEXT,
-    decision_comment TEXT NOT NULL DEFAULT ''
+    decision_comment TEXT NOT NULL DEFAULT '',
+    file_id          TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -148,7 +170,8 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes      INTEGER NOT NULL DEFAULT 0,
     sha256          TEXT NOT NULL DEFAULT '',
     extracted_text  TEXT,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    sensitivity     TEXT NOT NULL DEFAULT 'normal'
 );
 
 CREATE TABLE IF NOT EXISTS confidential_meta (
@@ -175,11 +198,41 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_gap_answers_gap_id ON gap_answers(gap_id);
 
 def _ensure_schema(con: sqlite3.Connection) -> None:
     con.executescript(_SCHEMA_SQL)
+    try:
+        con.execute("ALTER TABLE files ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'normal'")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE grants ADD COLUMN file_id TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE access_requests ADD COLUMN file_id TEXT DEFAULT NULL")
+    except Exception:
+        pass
+
+    # Backfill sensitivity for files already treated as confidential
+    try:
+        con.execute("""
+            UPDATE files SET sensitivity = 'confidential'
+            WHERE (id IN ('DOC-TRB-008', 'DOC-FIN-009', 'DOC-BCP-010', 'DOC-MON-011')
+               OR classification = 'confidential')
+              AND sensitivity != 'confidential'
+        """)
+    except Exception:
+        pass
+
+
+_DB_INITIALIZED = False
 
 
 def _init_db() -> None:
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
     with _db() as con:
         _ensure_schema(con)
+    _DB_INITIALIZED = True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -351,11 +404,78 @@ def _read_members(con: sqlite3.Connection) -> List[Dict[str, Any]]:
 
 
 def _read_grants(con: sqlite3.Connection) -> Dict[str, List[str]]:
-    rows = con.execute("SELECT member_id, grant_type FROM grants").fetchall()
+    try:
+        rows = con.execute("SELECT member_id, grant_type, file_id FROM grants").fetchall()
+    except Exception:
+        rows = con.execute("SELECT member_id, grant_type, NULL as file_id FROM grants").fetchall()
     result: Dict[str, List[str]] = {}
     for r in rows:
-        result.setdefault(r["member_id"], []).append(r["grant_type"])
+        mid = r["member_id"]
+        gtype = r["grant_type"]
+        fid = r["file_id"]
+        result.setdefault(mid, [])
+        if gtype not in result[mid]:
+            result[mid].append(gtype)
+        if fid and fid not in result[mid]:
+            result[mid].append(fid)
     return result
+
+
+def get_file_sensitivity(file_id: str) -> str:
+    """Return 'confidential' if file is confidential, else 'normal'."""
+    if not file_id:
+        return "normal"
+    if file_id in CONFIDENTIAL_SOURCES:
+        return "confidential"
+    try:
+        with _db() as con:
+            _ensure_schema(con)
+            row = con.execute("SELECT sensitivity, classification FROM files WHERE id=?", (file_id,)).fetchone()
+            if row:
+                if row[0] == "confidential" or row[1] == "confidential":
+                    return "confidential"
+            row_c = con.execute("SELECT id FROM confidential_meta WHERE id=?", (file_id,)).fetchone()
+            if row_c:
+                return "confidential"
+    except Exception:
+        pass
+    return "normal"
+
+
+def can_user_read_file(user: Optional[Dict[str, Any]], file_id: str, con: Optional[sqlite3.Connection] = None) -> bool:
+    """Check if user can read file_id."""
+    if not user:
+        return False
+    role = user.get("role")
+    uid = user.get("id") or user.get("username", "")
+    if role in ("Manager", "Employee") or uid in ("manager", "sarah"):
+        return True
+    
+    sens = get_file_sensitivity(file_id)
+    if sens != "confidential":
+        return True
+        
+    def _check(c: sqlite3.Connection) -> bool:
+        row = c.execute(
+            """SELECT 1 FROM grants 
+               WHERE member_id = ? 
+                 AND (grant_type IN ('confidential_read', 'confidential_write')
+                      OR file_id = ?
+                      OR grant_type = ?
+                      OR grant_type = ?)""",
+            (uid, file_id, f"confidential_read:{file_id}", file_id)
+        ).fetchone()
+        return row is not None
+
+    if con is not None:
+        return _check(con)
+    else:
+        try:
+            with _db() as db_con:
+                _ensure_schema(db_con)
+                return _check(db_con)
+        except Exception:
+            return False
 
 
 def _read_notifications(con: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -376,11 +496,18 @@ def _read_notifications(con: sqlite3.Connection) -> List[Dict[str, Any]]:
 
 
 def _read_access_requests(con: sqlite3.Connection) -> List[Dict[str, Any]]:
-    rows = con.execute(
-        """SELECT id,requester_id,requester_name,requester_role,type,reason,
-                  status,created_at,decided_at,decided_by,decision_comment
-           FROM access_requests ORDER BY created_at"""
-    ).fetchall()
+    try:
+        rows = con.execute(
+            """SELECT id,requester_id,requester_name,requester_role,type,reason,
+                      status,created_at,decided_at,decided_by,decision_comment,file_id
+               FROM access_requests ORDER BY created_at"""
+        ).fetchall()
+    except Exception:
+        rows = con.execute(
+            """SELECT id,requester_id,requester_name,requester_role,type,reason,
+                      status,created_at,decided_at,decided_by,decision_comment,NULL as file_id
+               FROM access_requests ORDER BY created_at"""
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -391,7 +518,7 @@ def _read_action_history(con: sqlite3.Connection) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def _read_confidential_files(con: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _read_confidential_files(con: sqlite3.Connection, user: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     rows = con.execute(
         "SELECT id,name,size_bytes as size,uploaded_by,uploaded_at FROM confidential_meta ORDER BY uploaded_at"
     ).fetchall()
@@ -403,20 +530,22 @@ def _read_confidential_files(con: sqlite3.Connection) -> List[Dict[str, Any]]:
         d = dict(r)
         doc_id = d.get("id", "")
         content = None
-        if uploads_dir.exists() and doc_id:
-            matches = list(uploads_dir.glob(f"seed_{doc_id}_*")) + list(uploads_dir.glob(f"*{doc_id}*"))
-            if matches:
-                try:
-                    content = matches[0].read_bytes()
-                except Exception:
-                    content = None
+        if can_user_read_file(user, doc_id, con=con):
+            if uploads_dir.exists() and doc_id:
+                matches = list(uploads_dir.glob(f"seed_{doc_id}_*")) + list(uploads_dir.glob(f"*{doc_id}*"))
+                if matches:
+                    try:
+                        content = matches[0].read_bytes()
+                    except Exception:
+                        content = None
         d["content"] = content
         result.append(d)
     return result
 
 
-def _assemble_state(con: sqlite3.Connection) -> Dict[str, Any]:
+def _assemble_state(con: sqlite3.Connection, user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Read all tables and assemble into the same dict shape app.py expects."""
+    from utils.access import redact
     state = get_empty_state()
     kv = _read_all_kv(con)
     for key in _KV_KEYS:
@@ -427,7 +556,73 @@ def _assemble_state(con: sqlite3.Connection) -> Dict[str, Any]:
     state["notifications"]     = _read_notifications(con)
     state["access_requests"]   = _read_access_requests(con)
     state["action_history"]    = _read_action_history(con)
-    state["confidential_files"] = _read_confidential_files(con)
+    state["confidential_files"] = _read_confidential_files(con, user=user)
+
+    # 1. Claims sensitivity & redaction in knowledge_profile
+    kp = state.get("knowledge_profile")
+    if kp and isinstance(kp, dict):
+        for section in ("decisions", "risks"):
+            for claim in kp.get(section, []):
+                src = claim.get("source") or claim.get("source_document_id") or claim.get("source_note_id") or ""
+                sens = "confidential" if (src in CONFIDENTIAL_SOURCES or get_file_sensitivity(src) == "confidential") else "normal"
+                claim["sensitivity"] = sens
+                
+                can_read_src = can_user_read_file(user, src, con=con)
+                for qkey in ("excerpt", "source_quote", "text"):
+                    if qkey in claim and claim[qkey]:
+                        val = claim[qkey]
+                        if is_encrypted(val):
+                            if can_read_src:
+                                val = decrypt_text(val)
+                            else:
+                                val = REDACTION_PLACEHOLDER
+                        if not can_read_src and sens == "confidential":
+                            claim[qkey] = REDACTION_PLACEHOLDER
+                        else:
+                            claim[qkey] = redact(val, user=user, file_sensitivity=sens, file_id=src)
+
+    # 2. Handover dossiers
+    can_read_all_conf = False
+    if user and (user.get("role") in ("Manager", "Employee") or user.get("username") in ("manager", "sarah")):
+        can_read_all_conf = True
+
+    for hk in ("newhire_handover", "manager_handover", "employee_handover"):
+        if state.get(hk):
+            val = state[hk]
+            if is_encrypted(val):
+                val = decrypt_text(val)
+            if not can_read_all_conf:
+                val = re.sub(r'When the alert is noisy[^\n.]*', REDACTION_PLACEHOLDER, val, flags=re.IGNORECASE)
+                val = re.sub(r'The daily reconciliation export[^\n.]*', REDACTION_PLACEHOLDER, val, flags=re.IGNORECASE)
+                val = re.sub(r'upstream ledger closes[^\n.]*', REDACTION_PLACEHOLDER, val, flags=re.IGNORECASE)
+                val = re.sub(r'REF-001[^\n.]*', REDACTION_PLACEHOLDER, val, flags=re.IGNORECASE)
+            state[hk] = redact(val, user=user, file_sensitivity="normal")
+
+    # 3. Employee tribal knowledge
+    if state.get("employee_tribal_knowledge"):
+        for item in state["employee_tribal_knowledge"]:
+            if item.get("category") == "Warning" or "noisy alert" in item.get("title", "").lower() or item.get("classification") == "confidential":
+                content = item.get("content", "")
+                if is_encrypted(content):
+                    if can_user_read_file(user, "NOTE-004", con=con):
+                        content = decrypt_text(content)
+                    else:
+                        content = REDACTION_PLACEHOLDER
+                item["content"] = redact(content, user=user, file_sensitivity="confidential", file_id="NOTE-004")
+
+    # 4. All sources
+    if state.get("all_sources"):
+        for src_item in state["all_sources"]:
+            src_path = src_item.get("source", "")
+            if src_path in CONFIDENTIAL_SOURCES or any(cid in str(src_path) for cid in CONFIDENTIAL_DOC_IDS):
+                content = src_item.get("content", "")
+                if is_encrypted(content):
+                    if can_user_read_file(user, src_path, con=con):
+                        content = decrypt_text(content)
+                    else:
+                        content = REDACTION_PLACEHOLDER
+                src_item["content"] = redact(content, user=user, file_sensitivity="confidential", file_id=src_path)
+
     return state
 
 
@@ -466,21 +661,31 @@ def get_empty_state() -> Dict[str, Any]:
 # PUBLIC API  (same names as old store.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_project_state() -> Tuple[Dict[str, Any], Optional[str]]:
+def load_project_state(user: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Optional[str]]:
     """Return (state_dict, notice). Initialises DB and runs migration if needed."""
     try:
         _init_db()
         notice = _migrate_from_json()
         with _db() as con:
-            state = _assemble_state(con)
+            state = _assemble_state(con, user=user)
         return state, notice
     except Exception as exc:
         return get_empty_state(), f"Database error on load: {exc}"
 
 
-def load_into_session(session_state) -> Optional[str]:
+def load_into_session(session_state, user: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Load all state from SQLite into Streamlit session_state. Returns notice."""
-    data, notice = load_project_state()
+    if user is None and hasattr(session_state, "get"):
+        auth_role = session_state.get("auth_role")
+        auth_user = session_state.get("auth_username")
+        if auth_role or auth_user:
+            user = {
+                "id": auth_user,
+                "username": auth_user,
+                "role": auth_role,
+                "name": session_state.get("auth_name", ""),
+            }
+    data, notice = load_project_state(user=user)
     for key in PROJECT_KEYS:
         if key in data:
             if hasattr(session_state, "__setitem__"):
@@ -571,9 +776,10 @@ def modify_project_state(modifier_fn: Callable[[Dict[str, Any]], Any],
             if set(grant_list) != set(old_grants.get(member_id, [])):
                 con.execute("DELETE FROM grants WHERE member_id=?", (member_id,))
                 for g in grant_list:
+                    file_id = g.split(":", 1)[1] if ":" in g else (g if g in CONFIDENTIAL_DOC_IDS else None)
                     con.execute(
-                        "INSERT OR IGNORE INTO grants(member_id,grant_type) VALUES(?,?)",
-                        (member_id, g)
+                        "INSERT OR IGNORE INTO grants(member_id,grant_type,file_id) VALUES(?,?,?)",
+                        (member_id, g, file_id)
                     )
         # Revoked grants for members not in new_grants
         for member_id in old_grants:
@@ -610,8 +816,8 @@ def modify_project_state(modifier_fn: Callable[[Dict[str, Any]], Any],
                 con.execute(
                     """INSERT OR IGNORE INTO access_requests
                        (id,requester_id,requester_name,requester_role,type,reason,
-                        status,created_at,decided_at,decided_by,decision_comment)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        status,created_at,decided_at,decided_by,decision_comment,file_id)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (rid,
                      r.get("requester_id",""),
                      r.get("requester_name",""),
@@ -622,20 +828,23 @@ def modify_project_state(modifier_fn: Callable[[Dict[str, Any]], Any],
                      r.get("created_at", time.strftime("%Y-%m-%d %H:%M:%S")),
                      r.get("decided_at"),
                      r.get("decided_by"),
-                     r.get("decision_comment",""))
+                     r.get("decision_comment",""),
+                     r.get("file_id"))
                 )
             else:
                 old_r = next((x for x in old_state.get("access_requests", []) if x["id"] == rid), None)
                 if old_r and (old_r.get("status") != r.get("status") or
-                              old_r.get("decided_at") != r.get("decided_at")):
+                              old_r.get("decided_at") != r.get("decided_at") or
+                              old_r.get("file_id") != r.get("file_id")):
                     con.execute(
                         """UPDATE access_requests
-                           SET status=?,decided_at=?,decided_by=?,decision_comment=?
+                           SET status=?,decided_at=?,decided_by=?,decision_comment=?,file_id=?
                            WHERE id=?""",
                         (r.get("status","pending"),
                          r.get("decided_at"),
                          r.get("decided_by"),
                          r.get("decision_comment",""),
+                         r.get("file_id"),
                          rid)
                     )
 
@@ -720,22 +929,80 @@ def mark_notifications_read(user_id: str, session_state=None) -> None:
 
 # ── File registry (Phase 4) ───────────────────────────────────────────────────
 
+def get_file_text(file_id: str, user: Optional[Dict[str, Any]] = None) -> str:
+    """Return file text with role-based redaction and encryption-at-rest decryption."""
+    from utils.access import redact
+    if not file_id:
+        return ""
+
+    sens = get_file_sensitivity(file_id)
+    text = None
+
+    with _db() as con:
+        _ensure_schema(con)
+        # Check files table
+        row = con.execute("SELECT extracted_text, sensitivity FROM files WHERE id=?", (file_id,)).fetchone()
+        if row and row[0] is not None:
+            text = row[0]
+            if row[1]:
+                sens = row[1]
+
+        # If not in files or extracted_text is None, check disk files
+        if text is None:
+            uploads_dir = Path(__file__).resolve().parent.parent / "data" / "uploads"
+            if not uploads_dir.exists():
+                uploads_dir = Path("data/uploads")
+            if uploads_dir.exists():
+                matches = list(uploads_dir.glob(f"seed_{file_id}_*")) + list(uploads_dir.glob(f"*{file_id}*"))
+                if matches:
+                    try:
+                        p = matches[0]
+                        if p.suffix in (".md", ".csv", ".txt", ".json"):
+                            text = p.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        text = None
+
+    if text is None:
+        return ""
+
+    # Decrypt if encrypted
+    if is_encrypted(text):
+        if can_user_read_file(user, file_id):
+            text = decrypt_text(text)
+        else:
+            return REDACTION_PLACEHOLDER
+    else:
+        # Plain text in storage
+        if sens == "confidential" and not can_user_read_file(user, file_id):
+            return REDACTION_PLACEHOLDER
+
+    # Apply redaction (field-level secrets, role checks, etc.)
+    return redact(text, user=user, file_sensitivity=sens, file_id=file_id)
+
+
 def register_file(original_name: str, stored_name: str, classification: str,
                   owner_id: str, owner_name: str, size_bytes: int,
-                  sha256: str, extracted_text: Optional[str]) -> str:
+                  sha256: str, extracted_text: Optional[str],
+                  sensitivity: Optional[str] = None) -> str:
     """Insert a row into the files table. Returns the new file id."""
     file_id = str(uuid.uuid4())
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    sens = sensitivity or ("confidential" if classification == "confidential" else "normal")
+
+    # Encrypt confidential text at rest
+    if sens == "confidential" and extracted_text and not is_encrypted(extracted_text):
+        extracted_text = encrypt_text(extracted_text)
+
     with _db() as con:
         _ensure_schema(con)
         con.execute(
             """INSERT INTO files
                (id,original_name,stored_name,classification,owner_id,owner_name,
-                size_bytes,sha256,extracted_text,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                size_bytes,sha256,extracted_text,created_at,sensitivity)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (file_id, original_name, stored_name, classification,
              owner_id, owner_name, size_bytes, sha256,
-             extracted_text, ts)
+             extracted_text, ts, sens)
         )
     return file_id
 

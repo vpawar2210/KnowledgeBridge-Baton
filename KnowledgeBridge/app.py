@@ -811,7 +811,7 @@ def complete_login(user: dict) -> None:
     st.session_state.auth_role = user["role"]
     st.session_state.auth_name = user["name"]
 
-    notice = load_into_session(st.session_state)
+    notice = load_into_session(st.session_state, user=user)
     if notice:
         st.session_state.state_notice = notice
 
@@ -3109,7 +3109,7 @@ elif st.session_state.page == "confidential":
                 st.markdown(f"**{_cf_name}** ({cf.get('size', 0)} bytes)")
                 st.caption(f"Uploaded: {cf.get('uploaded_at', '')} by {cf.get('uploaded_by', '')}")
                 # Permission check before showing content
-                if can_read(cur_user, is_confidential=True, state=st.session_state):
+                if can_read(cur_user, is_confidential=True, state=st.session_state, file_id=cf.get("id")):
                     with st.expander("View file content"):
                         # Files stored before this fix had content as decoded text string.
                         # Files stored after this fix have content=None (bytes stored separately).

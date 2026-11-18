@@ -64,3 +64,61 @@ Local Windows workaround: tables fall back to Markdown when pandas/pyarrow is bl
 - Replaced 3 call sites in `KnowledgeBridge/app.py` with `safe_table`.
 - Added unit tests in `KnowledgeBridge/tests/test_safe_table.py` (9 tests passing).
 
+---
+
+## Role-Based Redaction & Encryption at Rest
+
+### Summary of Changes
+Implemented granular document-level and field-level redaction enforced directly in the data-access layer (`utils/store.py` and `utils/access.py`), paired with AES-CBC/Fernet encryption of confidential text at rest (`utils/crypto.py`).
+
+1. **Files Touched**:
+   - `KnowledgeBridge/requirements.txt`: Added `cryptography` dependency on a new line.
+   - `KnowledgeBridge/.gitignore`: Added `data/.baton_key`, `.baton_key`, and `*.key`.
+   - `KnowledgeBridge/utils/crypto.py` (NEW): Key management via `BATON_DATA_KEY` / `data/.baton_key`, `encrypt_text()`, `decrypt_text()`, `is_encrypted()`, fail-closed error handling returning placeholder `"[REDACTED - request access]"`.
+   - `KnowledgeBridge/utils/access.py`:
+     - Identified confidential documents (`CONFIDENTIAL_DOC_IDS = {"DOC-TRB-008", "DOC-FIN-009", "DOC-BCP-010", "DOC-MON-011"}`) and notes (`NOTE-004`).
+     - Added `redact()` engine with pattern matching for secrets (API keys, tokens, passwords across all roles), PII (emails, phone numbers), and Harborline financial currency amounts.
+     - Added `can_read_file()` and updated `can_read()` with granular `file_id` support.
+     - Updated `create_request()` and `decide_request()` to support per-file scoped approvals.
+   - `KnowledgeBridge/utils/store.py`:
+     - Added `sensitivity` column (`TEXT NOT NULL DEFAULT 'normal'`) to `files` table schema and dynamic migration in `_ensure_schema()`.
+     - Added `file_id` column (`TEXT DEFAULT NULL`) to `grants` and `access_requests` table schemas.
+     - Added `get_file_sensitivity()`, `can_user_read_file()`, and `get_file_text()`.
+     - Updated `register_file()`, `_read_grants()`, `_read_access_requests()`, `_read_confidential_files()`, and `modify_project_state()`.
+     - Updated `_assemble_state()` to enforce role redaction on confidential claims, unwritten rules, dossier texts, and file contents.
+     - Updated `load_into_session(session_state, user=None)` and `load_project_state(user=None)` to accept `user` parameter; direct calls with no user default strictly to the restricted successor view.
+   - `KnowledgeBridge/utils/demo_seed.py`:
+     - Updated table schemas and seeding to store confidential files (`files.extracted_text`) and findings encrypted with `"enc:v1:"` prefix at rest.
+   - `KnowledgeBridge/utils/gemini_engine.py`:
+     - Updated `analyze_sources(texts, api_key, user=None)` to pre-filter and redact confidential sources and secret patterns for unauthorized users.
+   - `KnowledgeBridge/app.py`:
+     - Updated line 814 `load_into_session(st.session_state, user=user)`.
+     - Updated line 3112 `can_read(cur_user, is_confidential=True, state=st.session_state, file_id=cf.get("id"))`.
+   - `KnowledgeBridge/migrate_encrypt.py` (NEW):
+     - Standalone, idempotent migration script requiring `--yes` flag to encrypt confidential plaintext rows at rest and perform `VACUUM` and `PRAGMA wal_checkpoint(TRUNCATE)`.
+   - `KnowledgeBridge/QUESTIONS.md` (NEW):
+     - Question regarding `DOC-SEC-002` classification logged per instructions.
+   - `KnowledgeBridge/tests/conftest.py`:
+     - Added fixture isolating `demo_seed.DB_FILE` and `demo_seed.UPLOADS_DIR` to temporary directories.
+   - `KnowledgeBridge/tests/test_redaction_storage.py` and `KnowledgeBridge/tests/test_permissions.py` (NEW):
+     - Comprehensive test suites verifying all 14 criteria.
+
+2. **Tables and Columns Added**:
+   - `files`: Added column `sensitivity TEXT NOT NULL DEFAULT 'normal'`.
+   - `grants`: Added column `file_id TEXT DEFAULT NULL`.
+   - `access_requests`: Added column `file_id TEXT DEFAULT NULL`.
+
+3. **Grant Mapping**:
+   - Broad grants (`grant_type = 'confidential_read'` with `file_id IS NULL`) grant access to all confidential files (legacy compatibility).
+   - Per-file grants are stored as `grant_type = 'confidential_read:{file_id}'` with `file_id = '{file_id}'`.
+   - Checking a file checks either a specific grant `confidential_read:{file_id}` (or `file_id == req_file_id`) or a broad grant `confidential_read`.
+   - Approving file A adds only `confidential_read:file_A` and does NOT unlock file B.
+   - Rejecting or revoking deletes the grant and relocks the file.
+
+4. **Verification Performed**:
+   - Executed full pytest suite (`pytest tests/`): all 30 tests passed.
+   - Verified AST parse of `app.py`.
+   - Executed Step 7 baseline snapshot comparison (`scratch/compare_baseline.py`): Manager and Sarah outputs are 100% byte/content identical; Marcus receives redacted placeholders for confidential excerpts, files, and findings while normal text remains identical.
+   - Real database `data/baton.db` kept completely untouched.
+
+
