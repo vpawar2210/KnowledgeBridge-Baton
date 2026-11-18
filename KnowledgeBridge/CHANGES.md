@@ -122,3 +122,40 @@ Implemented granular document-level and field-level redaction enforced directly 
    - Real database `data/baton.db` kept completely untouched.
 
 
+
+## Deadlock Fix (utils/store.py) — branch deadlock-fix
+
+**Bug**: `modify_project_state` held a write transaction while calling
+`_assemble_state`, which called `get_file_sensitivity(src)` opening a
+second write connection (via `_ensure_schema`), causing a 30-second
+self-deadlock per confidential source file.
+
+**Fix**:
+- `get_file_sensitivity(file_id, con=None)`: accepts optional connection; when
+  `con` is passed, reuses it. When `con=None`, opens a read-only connection
+  with `PRAGMA query_only = ON` — no `_ensure_schema`, no writes.
+- `can_user_read_file(user, file_id, con=None)`: passes `con` through to
+  `get_file_sensitivity`; `con=None` path uses read-only connection
+  with `PRAGMA query_only = ON` — no `_ensure_schema`, no writes.
+- `_assemble_state`: passes `con` to `get_file_sensitivity(src, con=con)`.
+- `modify_project_state`: removed redundant `_ensure_schema(con)` inside write
+  transaction (`_init_db()` already ran schema setup before the transaction).
+- `get_file_text`: calls `get_file_sensitivity(file_id, con=con)` **inside**
+  the open connection block instead of before it (sequential, not nested).
+- Connection timeout reduced from 30 s to 10 s to surface future deadlocks faster.
+- Added 7 regression tests in `tests/test_no_deadlock.py`.
+
+**Result**: `pytest tests/ -v --timeout=60` → 37 passed in 2.76 s (was stuck for
+60+ s per confidential source before).
+
+## Deadlock regression tests strengthened (tests/test_no_deadlock.py)
+
+Tests 1–5 now use the full demo seed (same as test_permissions.py) so the
+knowledge_profile claims with sources NOT in CONFIDENTIAL_SOURCES
+(DOC-INC-001, DOC-REF-004, DOC-REL-006, etc.) force the real DB-lookup
+path of get_file_sensitivity — the exact path that deadlocked on old code.
+Added a structural test that wraps sqlite3.connect with a concurrent-
+connection counter and asserts the peak is exactly 1 inside
+modify_project_state.  Test 6 split into 6a (no-con path) and 6b (con= path)
+so each failure is independently diagnosable.  Test 7 unchanged.
+Total: 39 tests, all pass.

@@ -83,7 +83,7 @@ def ensure_data_dir() -> Path:
 
 
 @contextmanager
-def _db(timeout: float = 30.0):
+def _db(timeout: float = 10.0):
     """Yield a SQLite connection with WAL, FK enforcement and busy timeout."""
     ensure_data_dir()
     con = sqlite3.connect(str(DB_FILE), timeout=timeout,
@@ -91,7 +91,7 @@ def _db(timeout: float = 30.0):
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA busy_timeout = 30000")
+        con.execute("PRAGMA busy_timeout = 10000")
         con.execute("PRAGMA foreign_keys=ON")
         yield con
         con.commit()
@@ -421,25 +421,50 @@ def _read_grants(con: sqlite3.Connection) -> Dict[str, List[str]]:
     return result
 
 
-def get_file_sensitivity(file_id: str) -> str:
-    """Return 'confidential' if file is confidential, else 'normal'."""
+def get_file_sensitivity(file_id: str, con: Optional[sqlite3.Connection] = None) -> str:
+    """Return 'confidential' if file is confidential, else 'normal'.
+
+    If *con* is given, reuse it (no new connection, no schema writes).
+    If *con* is None, open a short read-only connection (no _ensure_schema).
+    """
     if not file_id:
         return "normal"
     if file_id in CONFIDENTIAL_SOURCES:
         return "confidential"
-    try:
-        with _db() as con:
-            _ensure_schema(con)
-            row = con.execute("SELECT sensitivity, classification FROM files WHERE id=?", (file_id,)).fetchone()
-            if row:
-                if row[0] == "confidential" or row[1] == "confidential":
-                    return "confidential"
-            row_c = con.execute("SELECT id FROM confidential_meta WHERE id=?", (file_id,)).fetchone()
-            if row_c:
+
+    def _query(c: sqlite3.Connection) -> str:
+        row = c.execute(
+            "SELECT sensitivity, classification FROM files WHERE id=?", (file_id,)
+        ).fetchone()
+        if row:
+            if row[0] == "confidential" or row[1] == "confidential":
                 return "confidential"
-    except Exception:
-        pass
-    return "normal"
+        row_c = c.execute(
+            "SELECT id FROM confidential_meta WHERE id=?", (file_id,)
+        ).fetchone()
+        if row_c:
+            return "confidential"
+        return "normal"
+
+    if con is not None:
+        try:
+            return _query(con)
+        except Exception:
+            return "normal"
+    else:
+        try:
+            # Read-only: open a plain connection, no _ensure_schema, no writes.
+            ensure_data_dir()
+            ro_con = sqlite3.connect(str(DB_FILE), timeout=10.0,
+                                     check_same_thread=False)
+            ro_con.row_factory = sqlite3.Row
+            try:
+                ro_con.execute("PRAGMA query_only = ON")
+                return _query(ro_con)
+            finally:
+                ro_con.close()
+        except Exception:
+            return "normal"
 
 
 def can_user_read_file(user: Optional[Dict[str, Any]], file_id: str, con: Optional[sqlite3.Connection] = None) -> bool:
@@ -450,8 +475,9 @@ def can_user_read_file(user: Optional[Dict[str, Any]], file_id: str, con: Option
     uid = user.get("id") or user.get("username", "")
     if role in ("Manager", "Employee") or uid in ("manager", "sarah"):
         return True
-    
-    sens = get_file_sensitivity(file_id)
+
+    # Pass con through to get_file_sensitivity to avoid a second connection.
+    sens = get_file_sensitivity(file_id, con=con)
     if sens != "confidential":
         return True
         
@@ -471,9 +497,17 @@ def can_user_read_file(user: Optional[Dict[str, Any]], file_id: str, con: Option
         return _check(con)
     else:
         try:
-            with _db() as db_con:
-                _ensure_schema(db_con)
-                return _check(db_con)
+            # Read-only path: no _ensure_schema (avoids deadlock when called
+            # from inside a write transaction such as modify_project_state).
+            ensure_data_dir()
+            ro_con = sqlite3.connect(str(DB_FILE), timeout=10.0,
+                                     check_same_thread=False)
+            ro_con.row_factory = sqlite3.Row
+            try:
+                ro_con.execute('PRAGMA query_only = ON')
+                return _check(ro_con)
+            finally:
+                ro_con.close()
         except Exception:
             return False
 
@@ -564,7 +598,7 @@ def _assemble_state(con: sqlite3.Connection, user: Optional[Dict[str, Any]] = No
         for section in ("decisions", "risks"):
             for claim in kp.get(section, []):
                 src = claim.get("source") or claim.get("source_document_id") or claim.get("source_note_id") or ""
-                sens = "confidential" if (src in CONFIDENTIAL_SOURCES or get_file_sensitivity(src) == "confidential") else "normal"
+                sens = "confidential" if (src in CONFIDENTIAL_SOURCES or get_file_sensitivity(src, con=con) == "confidential") else "normal"
                 claim["sensitivity"] = sens
                 
                 can_read_src = can_user_read_file(user, src, con=con)
@@ -743,7 +777,9 @@ def modify_project_state(modifier_fn: Callable[[Dict[str, Any]], Any],
     """
     _init_db()
     with _db() as con:
-        _ensure_schema(con)
+        # _init_db() already ran _ensure_schema; don't re-run it inside the
+        # write transaction as that causes deadlocks if any helper opens a
+        # second connection (e.g. via get_file_sensitivity).
         state = _assemble_state(con)
         old_state = copy.deepcopy(state)
 
@@ -935,11 +971,13 @@ def get_file_text(file_id: str, user: Optional[Dict[str, Any]] = None) -> str:
     if not file_id:
         return ""
 
-    sens = get_file_sensitivity(file_id)
+    sens = "confidential" if file_id in CONFIDENTIAL_SOURCES else "normal"
     text = None
 
     with _db() as con:
         _ensure_schema(con)
+        # Determine sensitivity using the already-open connection (no second connection).
+        sens = get_file_sensitivity(file_id, con=con)
         # Check files table
         row = con.execute("SELECT extracted_text, sensitivity FROM files WHERE id=?", (file_id,)).fetchone()
         if row and row[0] is not None:
