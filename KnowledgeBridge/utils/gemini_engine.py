@@ -188,17 +188,18 @@ def _build_client(api_key: str) -> genai.Client:
     )
 
 
-def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output_tokens: int = 4096) -> str:
+def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output_tokens: int = 4096, timeout: int = 90) -> str:
     """
     Call Gemini using official google-genai SDK (v1beta), with fallback across
     working models and direct REST endpoint to guarantee compatibility with AQ. keys.
-    Enforces a strict 90-second timeout on every call.
-    Retries up to 2 times on 503/UNAVAILABLE with a 3-second wait.
+    Enforces a strict timeout on every call.
+    Retries up to 2 times on 503/UNAVAILABLE when timeout >= 30.
     Skips immediately on 404/NOT_FOUND.
     """
     key = api_key.strip()
     failed_models = {}
     had_timeout = False
+    retry_limit = 2 if timeout >= 30 else 0
 
     # 1. Try SDK with candidate models
     try:
@@ -209,8 +210,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
 
     if client:
         for model_name in FALLBACK_MODELS:
-            max_retries = 2
-            for attempt in range(max_retries + 1):
+            for attempt in range(retry_limit + 1):
                 try:
                     response = client.models.generate_content(
                         model=model_name,
@@ -218,7 +218,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
                         config=types.GenerateContentConfig(
                             temperature=temperature,
                             max_output_tokens=max_output_tokens,
-                            http_options=types.HttpOptions(timeout=90000),
+                            http_options=types.HttpOptions(timeout=timeout * 1000),
                         ),
                     )
                     if response and response.text:
@@ -233,9 +233,9 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
                     if "404" in err_str or "NOT_FOUND" in err_str:
                         break
 
-                    # If 503 or UNAVAILABLE, wait 3 seconds and retry up to 2 times
+                    # If 503 or UNAVAILABLE, wait 3 seconds and retry if retry_limit > 0
                     if "503" in err_str or "UNAVAILABLE" in err_str:
-                        if attempt < max_retries:
+                        if attempt < retry_limit:
                             time.sleep(3)
                             continue
                         else:
@@ -245,8 +245,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
 
     # 2. Try Direct Google Generative Language REST Endpoint (v1beta)
     for model_name in FALLBACK_MODELS:
-        max_retries = 2
-        for attempt in range(max_retries + 1):
+        for attempt in range(retry_limit + 1):
             try:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
                 headers = {
@@ -260,7 +259,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
                         "maxOutputTokens": max_output_tokens,
                     }
                 }
-                res = requests.post(url, headers=headers, json=payload, timeout=90)
+                res = requests.post(url, headers=headers, json=payload, timeout=timeout)
                 if res.status_code == 200:
                     data = res.json()
                     candidates = data.get("candidates", [])
@@ -276,9 +275,9 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
                 if res.status_code == 404 or "NOT_FOUND" in resp_snippet:
                     break
 
-                # If 503 or UNAVAILABLE, wait 3 seconds and retry up to 2 times
+                # If 503 or UNAVAILABLE, wait 3 seconds and retry if retry_limit > 0
                 if res.status_code == 503 or "UNAVAILABLE" in resp_snippet:
-                    if attempt < max_retries:
+                    if attempt < retry_limit:
                         time.sleep(3)
                         continue
                     else:
@@ -288,7 +287,7 @@ def _call_gemini(prompt: str, api_key: str, temperature: float = 0.2, max_output
 
             except requests.exceptions.Timeout:
                 had_timeout = True
-                failed_models[f"REST:{model_name}"] = "Request timed out after 90s"
+                failed_models[f"REST:{model_name}"] = f"Request timed out after {timeout}s"
                 break
             except Exception as e:
                 err_str = str(e)
@@ -388,72 +387,6 @@ def generate_manager_handover(knowledge_profile: dict, employee_name: str, proje
     return _call_gemini(prompt, api_key, temperature=0.4, max_output_tokens=3000)
 
 
-FOLLOWUP_INTERVIEW_PROMPT = """You are Baton AI, conducting an institutional knowledge interview with a departing senior engineer.
-We have identified an unresolved documentation gap.
-Generate ONE specific, focused follow-up question that the engineer can answer from personal memory in 2 to 3 sentences.
-
-UNRESOLVED KNOWLEDGE GAP:
-{gap_question}
-Detection Context: {gap_why}
-
-RELATED CLAIMS / SYSTEM EVIDENCE:
-{related_text}
-
-CRITICAL RULES:
-- Ask exactly ONE clear, direct question.
-- Do NOT repeat the gap text verbatim if you can make it more concrete, targeted, and operational (e.g. asking for specific runbook steps, dashboard names, escalation contacts, or commands).
-- The question must be answerable from engineer memory in 2 to 3 sentences.
-- Return ONLY the question string. No greeting, no conversational filler, no markdown.
-"""
-
-
-def generate_followup(gap: dict, related_claims: list = None, api_key: str = "") -> str:
-    """Generate ONE specific follow-up question for the leaver to answer in 2 to 3 sentences.
-    
-    Uses the same Gemini call path (_call_gemini).
-    If Gemini fails, times out or returns nothing, falls back to a plain question built
-    from the gap text, so the interview still works with no crash.
-    """
-    if isinstance(gap, dict):
-        gap_q = gap.get("question", "")
-        gap_why = gap.get("why_unknown", "")
-    else:
-        gap_q = str(gap)
-        gap_why = ""
-
-    fallback_question = gap_q.strip() if gap_q.strip() else "What operational context or guidance can you share regarding this component?"
-
-    if not api_key or not api_key.strip():
-        return fallback_question
-
-    claims_text = ""
-    if related_claims:
-        for c in related_claims[:3]:
-            if isinstance(c, dict):
-                claims_text += f"- {c.get('text', '')}\n"
-            else:
-                claims_text += f"- {str(c)}\n"
-    if not claims_text:
-        claims_text = "(No directly linked claims recorded)"
-
-    prompt = FOLLOWUP_INTERVIEW_PROMPT.format(
-        gap_question=gap_q,
-        gap_why=gap_why,
-        related_text=claims_text
-    )
-
-    try:
-        response = _call_gemini(prompt, api_key, temperature=0.3, max_output_tokens=250).strip()
-        cleaned = re.sub(r'^["\'`]+|["\'`]+$', '', response).strip()
-        if cleaned and len(cleaned) > 5:
-            if not cleaned.endswith("?"):
-                cleaned += "?"
-            return cleaned
-        return fallback_question
-    except Exception:
-        # Fall back gracefully to plain gap question on timeout or API error
-        return fallback_question
-
 
 def generate_newhire_handover(
     knowledge_profile: dict,
@@ -517,6 +450,7 @@ def generate_employee_handover(
     return _call_gemini(prompt, api_key, temperature=0.4, max_output_tokens=3000)
 
 
+
 FOLLOWUP_INTERVIEW_PROMPT = """You are Baton AI, conducting an institutional knowledge interview with a departing senior engineer.
 We have identified an unresolved documentation gap.
 Generate ONE specific, focused follow-up question that the engineer can answer from personal memory in 2 to 3 sentences.
@@ -539,9 +473,9 @@ CRITICAL RULES:
 def generate_followup(gap: dict, related_claims: list = None, api_key: str = "") -> str:
     """Generate ONE specific follow-up question for the leaver to answer in 2 to 3 sentences.
     
-    Uses the same Gemini call path (_call_gemini).
-    If Gemini fails, times out or returns nothing, falls back to a plain question built
-    from the gap text, so the interview still works with no crash.
+    Uses a fast timeout (4 seconds) so the UI remains silky smooth.
+    If Gemini fails, times out, or returns nothing, falls back to a plain question built
+    from the gap text, ensuring the interview always works with no crash.
     """
     if isinstance(gap, dict):
         gap_q = gap.get("question", "")
@@ -572,7 +506,7 @@ def generate_followup(gap: dict, related_claims: list = None, api_key: str = "")
     )
 
     try:
-        response = _call_gemini(prompt, api_key, temperature=0.3, max_output_tokens=250).strip()
+        response = _call_gemini(prompt, api_key, temperature=0.3, max_output_tokens=250, timeout=4).strip()
         cleaned = re.sub(r'^["\'`]+|["\'`]+$', '', response).strip()
         if cleaned and len(cleaned) > 5:
             if not cleaned.endswith("?"):

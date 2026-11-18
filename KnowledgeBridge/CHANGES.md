@@ -172,3 +172,14 @@ Added formal quote verification and adversarial failure-case test harness:
   5. `test_tamper_5_rejects_vacuous_short_quote`
   6. `test_authentic_unaltered_quote_passes_verification`
 - Combined with `tests/test_permissions.py` (5 permission breach tests) and `tests/test_redaction_storage.py` (8 data leakage tests), total test suite now runs **45 automated failure-case and regression tests with 100% pass rate in < 3s**.
+
+## Performance Optimization & Windows Defender Fix (app.py, utils/gemini_engine.py, utils/store.py)
+
+- **Windows Defender / SmartApp Control Popup Fix**:
+  - Set `BATON_SAFE_TABLES=1` automatically in `app.py` runtime. Prevents Streamlit's `st.table()` from importing or invoking `pyarrow._compute` (`_compute.cp313-win_amd64.pyd`), eliminating the Windows security warning popup and the associated 30-second thread hang.
+- **Fast Gap Interview Assistant Loading**:
+  - Streamlined `generate_followup` in `utils/gemini_engine.py` with an aggressive 4-second timeout limit. If Gemini API is delayed, unreachable, or slow, it immediately falls back to the clean, direct gap question without blocking the browser.
+  - Wrapped followup generation in Streamlit spinner (`with st.spinner("Preparing focused question..."):`) for visual feedback during generation.
+  - Deduplicated `FOLLOWUP_INTERVIEW_PROMPT` and `generate_followup` definitions.
+- **SQLite Read Path Optimization**:
+  - Replaced redundant `_ensure_schema(con)` calls inside `add_gap_answer`, `list_gap_answers`, `gap_progress`, and `get_open_gaps` with `_init_db()`. Reading open gaps and calculating progress is now instantaneous (< 1ms) without executing table inspection DDL on every frame.

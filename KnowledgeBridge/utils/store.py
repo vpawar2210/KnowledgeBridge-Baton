@@ -1108,8 +1108,8 @@ def add_gap_answer(
 
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
 
+    _init_db()
     with _db() as con:
-        _ensure_schema(con)
         # Check if record for this gap_id already exists
         existing = con.execute("SELECT id FROM gap_answers WHERE gap_id = ?", (gap_id,)).fetchone()
         if existing:
@@ -1143,8 +1143,8 @@ def add_gap_answer(
 
 def list_gap_answers(status: Optional[str] = None) -> List[Dict[str, Any]]:
     """List all stored gap answers, optionally filtered by status ('answered', 'unknown', 'skipped')."""
+    _init_db()
     with _db() as con:
-        _ensure_schema(con)
         if status:
             rows = con.execute(
                 """SELECT id, gap_id, question_text, answer_text, grade, status, author, created_at
@@ -1171,8 +1171,8 @@ def gap_progress(total_gaps: Optional[int] = None) -> Dict[str, Any]:
     - total: total number of gaps
     - summary: e.g. '3 of 8 gaps answered'
     """
+    _init_db()
     with _db() as con:
-        _ensure_schema(con)
         row = con.execute("SELECT COUNT(*) FROM gap_answers WHERE status = 'answered'").fetchone()
         interview_answered = row[0] if row else 0
 
@@ -1229,9 +1229,9 @@ def get_open_gaps() -> List[Dict[str, Any]]:
     """
     answered_ids = set()
     answered_questions = set()
+    _init_db()
     try:
         with _db() as con:
-            _ensure_schema(con)
             rows = con.execute("SELECT gap_id, question_text FROM gap_answers WHERE status = 'answered'").fetchall()
             for r in rows:
                 if r[0]:

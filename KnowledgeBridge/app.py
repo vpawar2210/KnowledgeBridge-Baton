@@ -8,6 +8,8 @@ import csv
 import io
 import json
 import os
+os.environ.setdefault("BATON_SAFE_TABLES", "1")
+os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 import re
 import textwrap
 import time
@@ -1755,11 +1757,12 @@ elif st.session_state.page == "employee":
                     if cache_key not in st.session_state:
                         from utils.gemini_engine import generate_followup
                         related = (profile.get("decisions", []) + profile.get("risks", []))[:3]
-                        st.session_state[cache_key] = generate_followup(
-                            curr_gap,
-                            related_claims=related,
-                            api_key=st.session_state.get("api_key", "")
-                        )
+                        with st.spinner("Preparing focused question..."):
+                            st.session_state[cache_key] = generate_followup(
+                                curr_gap,
+                                related_claims=related,
+                                api_key=st.session_state.get("api_key", "")
+                            )
                     followup_text = st.session_state[cache_key]
 
                     with st.chat_message("assistant"):
