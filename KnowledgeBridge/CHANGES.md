@@ -183,3 +183,22 @@ Added formal quote verification and adversarial failure-case test harness:
   - Deduplicated `FOLLOWUP_INTERVIEW_PROMPT` and `generate_followup` definitions.
 - **SQLite Read Path Optimization**:
   - Replaced redundant `_ensure_schema(con)` calls inside `add_gap_answer`, `list_gap_answers`, `gap_progress`, and `get_open_gaps` with `_init_db()`. Reading open gaps and calculating progress is now instantaneous (< 1ms) without executing table inspection DDL on every frame.
+
+## GitHub Connection Hardening (utils/github_guard.py, utils/github_connector.py, app.py)
+
+- **Guard Module (`utils/github_guard.py`)**:
+  - Implemented `parse_repo_ref` to validate GitHub URLs and references (accepts owner/repo, full URLs, trailing slashes, `.git`, subpaths like `/tree/main`). Rejects invalid hosts, empty/whitespace, embedded credentials, path traversals, and shell characters.
+  - Implemented `safe_fetch` wrapping the connector with non-technical friendly messages, 10s per-request timeout, zero token leakage, and automatic public caching.
+  - Implemented `build_commit_link` and `build_pr_link` for evidence citation links from validated owner/repo and hex SHAs.
+- **Token Security**:
+  - User-typed tokens live strictly in `st.session_state` (password widget), are never cached, logged, or written to disk. Server-side token read-only fallback via environment/secrets for hosted demo rate limits.
+- **Public In-Memory Cache**:
+  - Successful public repository fetches cached for 10 minutes (keyed by owner/repo) to conserve rate limits. Private/user-token fetches are never cached.
+- **UI Enhancements (`app.py`)**:
+  - Added empty-state help text with example (`octocat/Hello-World`).
+  - Added double-click deduplication to prevent duplicate repository sources.
+  - Added visual spinner during repository ingestion with graceful fallback to files and notes on error.
+- **Timeout Support (`utils/github_connector.py`)**:
+  - Added `timeout` parameter (default 10s) to `fetch_repo_knowledge`.
+- **Test Suite (`tests/test_github_guard.py`)**:
+  - Added 17 unit and regression tests covering all failure modes, token isolation, caching, and URL parsing. Full test suite: 62 passed.

@@ -27,13 +27,14 @@ def parse_repo_url(repo_url: str) -> tuple[str, str]:
     raise ValueError(f"Could not parse GitHub URL: {repo_url}")
 
 
-def fetch_repo_knowledge(repo_url: str, token: str = None) -> list[dict]:
+def fetch_repo_knowledge(repo_url: str, token: str = None, timeout: int = 10) -> list[dict]:
     """
     Fetch knowledge from a GitHub repository.
     
     Args:
         repo_url: GitHub repository URL
         token: Optional personal access token (for private repos)
+        timeout: HTTP timeout in seconds per request (default: 10)
     
     Returns:
         List of dicts with keys: content, source, source_type
@@ -52,7 +53,7 @@ def fetch_repo_knowledge(repo_url: str, token: str = None) -> list[dict]:
 
     def safe_get(url, params=None):
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=15)
+            resp = requests.get(url, headers=headers, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.HTTPError as e:
@@ -68,7 +69,7 @@ def fetch_repo_knowledge(repo_url: str, token: str = None) -> list[dict]:
     try:
         readme_data = safe_get(f"{base_url}/readme")
         if readme_data and "download_url" in readme_data:
-            readme_resp = requests.get(readme_data["download_url"], timeout=15)
+            readme_resp = requests.get(readme_data["download_url"], timeout=timeout)
             readme_content = readme_resp.text
             results.append({
                 "content": f"# README\n\n{readme_content}",

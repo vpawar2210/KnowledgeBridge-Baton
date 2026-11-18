@@ -1108,8 +1108,15 @@ if st.session_state.page == "connect":
             )
             st.session_state.github_token = github_token
 
-            if github_url:
-                st.info(f"Connector will extract README, recent commits, open issues, and pull requests from {github_url}")
+            if github_url.strip():
+                from utils.github_guard import parse_repo_ref
+                ok, parsed, err_msg = parse_repo_ref(github_url)
+                if ok and parsed:
+                    st.info(f"Connector will extract README, recent commits, open issues, and pull requests from {parsed[0]}/{parsed[1]}")
+                else:
+                    st.caption("Example: octocat/Hello-World")
+            else:
+                st.caption("Connect a public or private repository (example: octocat/Hello-World).")
 
         with tab3:
             pasted_text = st.text_area(
@@ -1252,15 +1259,22 @@ if st.session_state.page == "connect":
                             errors.append(f"File parsing: {_safe_err(e)}")
 
                     if st.session_state.github_url.strip():
-                        try:
-                            from utils.github_connector import fetch_repo_knowledge
-                            github_results = fetch_repo_knowledge(
+                        from utils.github_guard import safe_fetch
+                        with st.spinner("Connecting to GitHub repository..."):
+                            gh_res = safe_fetch(
                                 st.session_state.github_url.strip(),
-                                token=st.session_state.github_token.strip() or None
+                                user_token=st.session_state.github_token.strip() or None,
                             )
-                            all_sources.extend(github_results)
-                        except Exception as e:
-                            errors.append(f"GitHub connector: {_safe_err(e)}")
+                        if gh_res.ok and gh_res.data:
+                            # Double-click deduplication: replace or reuse existing sources for this repo
+                            existing_gh_sources = {item.get("source") for item in gh_res.data}
+                            all_sources = [s for s in all_sources if s.get("source") not in existing_gh_sources]
+                            all_sources.extend(gh_res.data)
+                            if gh_res.warning and gh_res.message:
+                                st.warning(gh_res.message)
+                        else:
+                            if gh_res.message:
+                                errors.append(f"GitHub: {gh_res.message}")
 
                     if st.session_state.pasted_text.strip():
                         all_sources.append({
