@@ -861,9 +861,9 @@ def render_login_page():
         st.caption("Demo data: the names Sarah Chen, Marcus Vance and Manager are synthetic. No real people or company information is used.")
 
         tab_signin, tab_student_reg, tab_company_reg = st.tabs([
-            "🔑 Sign in",
-            "🎓 Student Team Sign Up",
-            "🏢 Company Sign Up",
+            "Sign in",
+            "Student Team Sign Up",
+            "Company Sign Up",
         ])
 
         with tab_signin:
