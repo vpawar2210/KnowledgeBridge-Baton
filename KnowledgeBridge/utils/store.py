@@ -193,6 +193,33 @@ CREATE TABLE IF NOT EXISTS gap_answers (
     created_at    TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gap_answers_gap_id ON gap_answers(gap_id);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    org_type    TEXT NOT NULL DEFAULT 'company',
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id          TEXT PRIMARY KEY,
+    username    TEXT UNIQUE NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    role        TEXT NOT NULL DEFAULT 'Successor',
+    org_id      TEXT NOT NULL DEFAULT 'default_org',
+    org_type    TEXT NOT NULL DEFAULT 'company',
+    salt        TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    org_id      TEXT NOT NULL DEFAULT 'default_org',
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
 """
 
 
@@ -219,6 +246,27 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
                OR classification = 'confidential')
               AND sensitivity != 'confidential'
         """)
+    except Exception:
+        pass
+
+    # Seed default organization, project and demo accounts
+    try:
+        now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        con.execute(
+            "INSERT OR IGNORE INTO organizations(id, name, org_type, created_at) VALUES (?, ?, ?, ?)",
+            ("default_org", "Harborline Logistics", "company", now_ts)
+        )
+        con.execute(
+            "INSERT OR IGNORE INTO projects(id, name, org_id, description, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("default_project", "Harborline Core Payment Engine", "default_org", "Core financial transaction and reconciliation handover.", now_ts)
+        )
+        from utils.auth import ACCOUNTS
+        for u_id, rec in ACCOUNTS.items():
+            con.execute(
+                """INSERT OR IGNORE INTO users(id, username, name, role, org_id, org_type, salt, hash, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (u_id, rec["username"], rec["name"], rec["role"], "default_org", "company", rec["salt"], rec["hash"], now_ts)
+            )
     except Exception:
         pass
 

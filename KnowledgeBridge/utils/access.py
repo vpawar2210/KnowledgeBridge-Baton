@@ -32,8 +32,16 @@ ROLE_LABELS = {
     "Successor": "New joinee",
 }
 
+STUDENT_ROLE_LABELS = {
+    "Manager": "Team Leader",
+    "Employee": "Departing Team Member",
+    "Successor": "New Team Member",
+}
 
-def get_role_label(role: str) -> str:
+
+def get_role_label(role: str, org_type: str = "company") -> str:
+    if org_type == "student_team":
+        return STUDENT_ROLE_LABELS.get(role, role)
     return ROLE_LABELS.get(role, role)
 
 

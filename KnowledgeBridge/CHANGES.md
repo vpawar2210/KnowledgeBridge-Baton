@@ -1,3 +1,35 @@
+# CHANGES — Multi-Tenant Dynamic Accounts & Scoped Roles
+
+## Summary of Changes
+Implemented dynamic multi-tenancy, user registration for Student Teams and Corporate Workspaces, Team Leader and Manager roles, dynamic member account creation, and role-based access control (RBAC) in BATON (KnowledgeBridge). All existing demo logins (`manager`, `sarah`, `marcus`), evaluation flows, and tests are 100% preserved.
+
+## 1. Files Touched
+- `KnowledgeBridge/utils/store.py`:
+  - Added tables `organizations`, `users`, and `projects` to `_SCHEMA_SQL`.
+  - Added automatic seeding in `_ensure_schema()` for default organization (`default_org` / "Harborline Logistics"), default project (`default_project` / "Harborline Core Payment Engine"), and demo accounts (`manager`, `sarah`, `marcus`).
+- `KnowledgeBridge/utils/demo_seed.py`:
+  - Added `organizations`, `users`, and `projects` tables to schema to maintain table consistency on demo reset.
+- `KnowledgeBridge/utils/auth.py`:
+  - Implemented `hash_password(password)`: Generates cryptographically secure 16-byte random salt and `pbkdf2_hmac` SHA-256 hash (100,000 iterations).
+  - Updated `authenticate(username, password)`: Queries SQLite `users` table first, with constant-time `hmac.compare_digest` password verification and 5-attempt brute-force lockout, falling back to static `ACCOUNTS` dictionary for backward compatibility.
+  - Implemented `register_organization_and_leader(...)`: Registers student team or company organization, creates initial project, and registers Team Leader or Manager.
+  - Implemented `create_member_account(...)`: Authorizes Team Leaders and Managers to provision dynamic accounts for new or departing team members.
+  - Implemented `list_org_users(org_id)`: Securely lists all accounts scoped to an organization without cross-tenant leakage.
+- `KnowledgeBridge/utils/access.py`:
+  - Updated `get_role_label(role, org_type)` to dynamically format role titles based on organization type:
+    - Student Team: `Team Leader`, `Departing Team Member`, `New Team Member`.
+    - Corporate: `Manager`, `Departing employee`, `New joinee`.
+- `KnowledgeBridge/app.py`:
+  - Added pre-import in-memory interception guard for `pyarrow`, suppressing Windows 11 SmartApp Control unsigned C-extension warnings without affecting pure-Python table fallbacks.
+  - Added Registration Tabs to login screen: `[🔑 Sign in, 🎓 Student Team Sign Up, 🏢 Company Sign Up]` with direct validation and immediate sign-in.
+  - Updated `complete_login()` to record `auth_org_id` and `auth_org_type` into `st.session_state`.
+  - Updated sidebar user block to display dynamic role badge mapped to the user's organization type.
+  - Added **"Add Member Account"** form and Organization Account Roster to Manager Review / Access Management screen (`page == "access_management"`).
+- `KnowledgeBridge/tests/test_multi_tenant_auth.py`:
+  - Added 10 automated test cases verifying registration, hashing, authentication, role mapping, account creation, and isolation.
+
+---
+
 # CHANGES — Gap Interview Engine Implementation
 
 ## Summary of Changes

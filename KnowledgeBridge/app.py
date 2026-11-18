@@ -8,6 +8,10 @@ import csv
 import io
 import json
 import os
+import sys
+# Prevent Windows SmartApp Control from triggering on unsigned pyarrow C-extensions
+for _blocked_mod in ("pyarrow", "pyarrow._compute", "pyarrow.compute"):
+    sys.modules.setdefault(_blocked_mod, None)
 os.environ.setdefault("BATON_SAFE_TABLES", "1")
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 import re
@@ -17,7 +21,16 @@ from pathlib import Path
 import streamlit as st
 from PIL import Image as _PILImage
 
-from utils.auth import authenticate, logout, is_locked, get_lockout_remaining, authenticate_demo
+from utils.auth import (
+    authenticate,
+    logout,
+    is_locked,
+    get_lockout_remaining,
+    authenticate_demo,
+    register_organization_and_leader,
+    create_member_account,
+    list_org_users,
+)
 from utils.store import (
     load_into_session,
     save_project_state,
@@ -812,6 +825,8 @@ def complete_login(user: dict) -> None:
     st.session_state.auth_username = user["username"]
     st.session_state.auth_role = user["role"]
     st.session_state.auth_name = user["name"]
+    st.session_state.auth_org_id = user.get("org_id", "default_org")
+    st.session_state.auth_org_type = user.get("org_type", "company")
 
     notice = load_into_session(st.session_state, user=user)
     if notice:
@@ -845,25 +860,104 @@ def render_login_page():
         """).strip(), unsafe_allow_html=True)
         st.caption("Demo data: the names Sarah Chen, Marcus Vance and Manager are synthetic. No real people or company information is used.")
 
-        with st.container(border=True):
-            with st.form("login_form", clear_on_submit=False):
-                st.markdown(textwrap.dedent("""
-                    <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:8px;">Sign in to your account</div>
-                """).strip(), unsafe_allow_html=True)
-                if is_locked():
-                    sec = get_lockout_remaining()
-                    st.error(f"Too many wrong attempts. Login locked for {sec} second(s).")
-                username_input = st.text_input("Username", placeholder="e.g. manager, sarah, marcus")
-                password_input = st.text_input("Password", type="password", placeholder="Enter password")
-                submit_login = st.form_submit_button("Sign in", type="primary", use_container_width=True, disabled=is_locked())
-                if submit_login:
-                    ok, msg, user = authenticate(username_input, password_input)
-                    if ok and user:
-                        complete_login(user)
-                        st.rerun()
-                    else:
-                        log_audit_entry(st.session_state, (username_input or "").strip() or "anonymous", "Failed login attempt", reason=msg)
-                        st.error(msg)
+        tab_signin, tab_student_reg, tab_company_reg = st.tabs([
+            "🔑 Sign in",
+            "🎓 Student Team Sign Up",
+            "🏢 Company Sign Up",
+        ])
+
+        with tab_signin:
+            with st.container(border=True):
+                with st.form("login_form", clear_on_submit=False):
+                    st.markdown(textwrap.dedent("""
+                        <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:8px;">Sign in to your account</div>
+                    """).strip(), unsafe_allow_html=True)
+                    if is_locked():
+                        sec = get_lockout_remaining()
+                        st.error(f"Too many wrong attempts. Login locked for {sec} second(s).")
+                    username_input = st.text_input("Username", placeholder="e.g. manager, sarah, marcus")
+                    password_input = st.text_input("Password", type="password", placeholder="Enter password")
+                    submit_login = st.form_submit_button("Sign in", type="primary", use_container_width=True, disabled=is_locked())
+                    if submit_login:
+                        ok, msg, user = authenticate(username_input, password_input)
+                        if ok and user:
+                            complete_login(user)
+                            st.rerun()
+                        else:
+                            log_audit_entry(st.session_state, (username_input or "").strip() or "anonymous", "Failed login attempt", reason=msg)
+                            st.error(msg)
+
+        with tab_student_reg:
+            with st.container(border=True):
+                with st.form("student_reg_form", clear_on_submit=False):
+                    st.markdown(textwrap.dedent("""
+                        <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:4px;">Register Student Team</div>
+                        <div style="font-size:12px;color:var(--text-2);margin-bottom:12px;">Create a new student project workspace. The registrant becomes the Team Leader.</div>
+                    """).strip(), unsafe_allow_html=True)
+                    st_team_name = st.text_input("Team / Project Name", placeholder="e.g. CodePune Thinkers", key="st_team_name")
+                    st_proj_title = st.text_input("Initial Project Title", placeholder="e.g. Autonomous Dispatch Engine", key="st_proj_title")
+                    col_st1, col_st2 = st.columns(2)
+                    with col_st1:
+                        st_leader_name = st.text_input("Leader Full Name", placeholder="e.g. Alex Morgan", key="st_leader_name")
+                        st_leader_user = st.text_input("Leader Username", placeholder="e.g. alexm", key="st_leader_user")
+                    with col_st2:
+                        st_leader_pass = st.text_input("Password (min 6 chars)", type="password", placeholder="Enter password", key="st_leader_pass")
+                        st_leader_pass_conf = st.text_input("Confirm Password", type="password", placeholder="Repeat password", key="st_leader_pass_conf")
+
+                    submit_student_reg = st.form_submit_button("Create Team & Sign In", type="primary", use_container_width=True)
+                    if submit_student_reg:
+                        if st_leader_pass != st_leader_pass_conf:
+                            st.error("Passwords do not match.")
+                        else:
+                            ok, msg, new_user = register_organization_and_leader(
+                                org_name=st_team_name,
+                                org_type="student_team",
+                                username=st_leader_user,
+                                password=st_leader_pass,
+                                full_name=st_leader_name,
+                                project_name=st_proj_title,
+                            )
+                            if ok and new_user:
+                                complete_login(new_user)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+
+        with tab_company_reg:
+            with st.container(border=True):
+                with st.form("company_reg_form", clear_on_submit=False):
+                    st.markdown(textwrap.dedent("""
+                        <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:4px;">Register Company Workspace</div>
+                        <div style="font-size:12px;color:var(--text-2);margin-bottom:12px;">Create an enterprise organization. The registrant becomes the Manager.</div>
+                    """).strip(), unsafe_allow_html=True)
+                    co_org_name = st.text_input("Company / Organization Name", placeholder="e.g. Acme FinTech Corp", key="co_org_name")
+                    co_proj_title = st.text_input("Initial Project Title", placeholder="e.g. Real-Time Settlement Engine", key="co_proj_title")
+                    col_co1, col_co2 = st.columns(2)
+                    with col_co1:
+                        co_mgr_name = st.text_input("Manager Full Name", placeholder="e.g. Jordan Vance", key="co_mgr_name")
+                        co_mgr_user = st.text_input("Manager Username", placeholder="e.g. jvance", key="co_mgr_user")
+                    with col_co2:
+                        co_mgr_pass = st.text_input("Password (min 6 chars)", type="password", placeholder="Enter password", key="co_mgr_pass")
+                        co_mgr_pass_conf = st.text_input("Confirm Password", type="password", placeholder="Repeat password", key="co_mgr_pass_conf")
+
+                    submit_co_reg = st.form_submit_button("Create Organization & Sign In", type="primary", use_container_width=True)
+                    if submit_co_reg:
+                        if co_mgr_pass != co_mgr_pass_conf:
+                            st.error("Passwords do not match.")
+                        else:
+                            ok, msg, new_user = register_organization_and_leader(
+                                org_name=co_org_name,
+                                org_type="company",
+                                username=co_mgr_user,
+                                password=co_mgr_pass,
+                                full_name=co_mgr_name,
+                                project_name=co_proj_title,
+                            )
+                            if ok and new_user:
+                                complete_login(new_user)
+                                st.rerun()
+                            else:
+                                st.error(msg)
 
         st.markdown(textwrap.dedent("""
             <div style="background:var(--subtle);border:1px solid var(--border);border-radius:6px;padding:12px 14px;margin-top:16px;font-size:13px;color:var(--text-2);">
@@ -916,12 +1010,15 @@ with st.sidebar:
         auth_role = st.session_state.get("auth_role") or ""
         auth_user = st.session_state.get("auth_username") or ""
 
+        auth_org_type = st.session_state.get("auth_org_type", "company")
+        display_role = get_role_label(auth_role, auth_org_type)
+
         # 2. User block
         if auth_name:
             st.markdown(textwrap.dedent(f"""
                 <div style="padding:4px 0 8px 0;margin-bottom:8px;">
                   <div class="kb-sidebar-user-name">{auth_name}</div>
-                  <div class="kb-sidebar-user-role">{auth_role}</div>
+                  <div class="kb-sidebar-user-role">{display_role}</div>
                 </div>
             """).strip(), unsafe_allow_html=True)
 
@@ -3069,6 +3166,76 @@ elif st.session_state.page == "access_management":
                         new_g.append("confidential_read")
                     set_grants(st.session_state, mgr, uid, new_g)
                     st.rerun()
+
+    # d. Create team/member account
+    auth_org_id = st.session_state.get("auth_org_id", "default_org")
+    auth_org_type = st.session_state.get("auth_org_type", "company")
+    is_student_org = (auth_org_type == "student_team")
+
+    section_title = "Add Student Team Member" if is_student_org else "Add Organization Member"
+    st.markdown("---")
+    st.subheader(section_title)
+    with st.container(border=True):
+        st.caption(
+            "Create an account for a new or departing member in your organization. "
+            "They will be able to sign in immediately with these credentials."
+        )
+        with st.form("form_add_member", clear_on_submit=True):
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                new_full_name = st.text_input("Full Name", placeholder="e.g. Maya Patel")
+                new_username = st.text_input("Username", placeholder="e.g. mayap")
+            with col_m2:
+                new_password = st.text_input("Temporary Password", type="password", placeholder="At least 6 characters")
+                role_choices = (
+                    ["Departing Team Member (Employee)", "New Team Member (Successor)"]
+                    if is_student_org
+                    else ["Departing employee (Employee)", "New joinee (Successor)"]
+                )
+                selected_role_label = st.selectbox("Role", role_choices)
+                mapped_role = "Employee" if "Employee" in selected_role_label else "Successor"
+
+            submit_new_member = st.form_submit_button("Create Member Account", type="primary")
+            if submit_new_member:
+                mgr = {
+                    "id": st.session_state.get("auth_username", "manager"),
+                    "username": st.session_state.get("auth_username", "manager"),
+                    "role": st.session_state.get("auth_role", "Manager"),
+                    "org_id": auth_org_id,
+                    "org_type": auth_org_type,
+                }
+                ok, msg, created_user = create_member_account(
+                    creator_user=mgr,
+                    username=new_username,
+                    password=new_password,
+                    full_name=new_full_name,
+                    role=mapped_role,
+                )
+                if ok and created_user:
+                    ensure_member(st.session_state, created_user)
+                    log_audit_entry(
+                        st.session_state,
+                        mgr["username"],
+                        f"Created {mapped_role} account for {new_username}"
+                    )
+                    st.success(f"Account for {created_user['name']} (@{created_user['username']}) created successfully!")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+    # e. List all dynamic accounts in this organization
+    org_users = list_org_users(auth_org_id)
+    if org_users:
+        with st.expander(f"All Accounts in this Organization / Team ({len(org_users)})", expanded=False):
+            user_table = []
+            for u in org_users:
+                user_table.append({
+                    "Username": u.get("username", ""),
+                    "Full Name": u.get("name", ""),
+                    "Role": get_role_label(u.get("role", ""), u.get("org_type", "company")),
+                    "Created": u.get("created_at", "")[:16] if u.get("created_at") else "",
+                })
+            safe_table(user_table)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -140,6 +140,33 @@ CREATE TABLE IF NOT EXISTS gap_answers (
     created_at    TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gap_answers_gap_id ON gap_answers(gap_id);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    org_type    TEXT NOT NULL DEFAULT 'company',
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id          TEXT PRIMARY KEY,
+    username    TEXT UNIQUE NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    role        TEXT NOT NULL DEFAULT 'Successor',
+    org_id      TEXT NOT NULL DEFAULT 'default_org',
+    org_type    TEXT NOT NULL DEFAULT 'company',
+    salt        TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    org_id      TEXT NOT NULL DEFAULT 'default_org',
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
 """
 
 
