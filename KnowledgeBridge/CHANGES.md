@@ -159,3 +159,16 @@ connection counter and asserts the peak is exactly 1 inside
 modify_project_state.  Test 6 split into 6a (no-con path) and 6b (con= path)
 so each failure is independently diagnosable.  Test 7 unchanged.
 Total: 39 tests, all pass.
+
+## Failure-Case & Adversarial Test Suite (tests/test_quote_tamper.py, utils/verifier.py)
+
+Added formal quote verification and adversarial failure-case test harness:
+- `utils/verifier.py`: Grounding and citation verification engine with `verify_quote()` and `verify_claim()`. Mathematically checks exact/normalized substring grounding against project documents, rejects fabricated/hallucinated quotes, detects altered numbers, blocks adversarial prompt injection patterns, rejects nonexistent/mismatched source IDs, and enforces minimum quote length.
+- `tests/test_quote_tamper.py`: 6 automated tests validating all 5 failure modes plus authentic citation acceptance:
+  1. `test_tamper_1_rejects_completely_fabricated_quote`
+  2. `test_tamper_2_rejects_altered_numeric_value_in_quote`
+  3. `test_tamper_3_rejects_adversarial_prompt_injection_in_quote`
+  4. `test_tamper_4_rejects_nonexistent_or_mismatched_source_document`
+  5. `test_tamper_5_rejects_vacuous_short_quote`
+  6. `test_authentic_unaltered_quote_passes_verification`
+- Combined with `tests/test_permissions.py` (5 permission breach tests) and `tests/test_redaction_storage.py` (8 data leakage tests), total test suite now runs **45 automated failure-case and regression tests with 100% pass rate in < 3s**.
