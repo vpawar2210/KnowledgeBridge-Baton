@@ -392,7 +392,7 @@ section[data-testid="stSidebar"], [data-testid="stSidebar"], [data-testid="stExp
 --nav-active: {t['sidebar_active_bg']};
 --nav-hover-text: {t['sidebar_hover_text']};
 --link: {t['primary']};
---warning-bg: {t['subtle']};
+--warning-bg: color-mix(in srgb, var(--warning) 12%, var(--card));
 --error: {t['danger']};
 --surface-2: {t['subtle']};
 --radius: 6px;
@@ -2196,7 +2196,7 @@ elif st.session_state.page == "review":
                         g_a = ga.get("answer_text") or ga.get("answer", "")
                         g_auth = ga.get("author", "Sarah Chen")
                         st.markdown(
-                            f"<div style='margin: 6px 0; padding: 10px 14px; background: var(--subtle); border-left: 3px solid var(--info); border-radius: 4px;'>"
+                            f"<div style='margin: 6px 0; padding: 10px 14px; background: color-mix(in srgb, var(--info) 12%, var(--card)); border-left: 3px solid var(--info); border-radius: 4px;'>"
                             f"<span class='kb-pill kb-pill-info' style='font-weight:700; letter-spacing:0.5px; margin-right:8px;'>ATTESTED</span>"
                             f"<b>{g_q}</b><br><span style='color:var(--text); font-size:0.9rem;'>&ldquo;{g_a}&rdquo;</span>"
                             f"<br><span style='color:var(--text-2); font-size:0.75rem;'>Attested by {g_auth} &bull; Stored in audit memory</span>"
