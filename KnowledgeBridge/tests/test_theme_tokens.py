@@ -105,3 +105,36 @@ def test_theme_wcag_contrast_rules(mode):
     for sem in ("success", "warning", "danger"):
         sem_ratio = contrast_ratio(t[sem], t["card"])
         assert sem_ratio >= 4.5, f"[{mode}] semantic {sem} on card contrast {sem_ratio:.2f} < 4.5"
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_primary_button_css_rule(mode):
+    """Verify inject_theme_css outputs targeted rules covering primary button labels with var(--on-primary)."""
+    from app import inject_theme_css
+
+    css = inject_theme_css(mode)
+    assert css is not None, "inject_theme_css should return the generated CSS string"
+    # Ensure primary button testids and kind are targeted
+    assert 'button[data-testid="stBaseButton-primary"]' in css
+    assert '[data-testid="stFormSubmitButton"]' in css
+    assert "var(--on-primary)" in css
+
+    # Ensure targeted label selector references var(--on-primary) !important
+    assert "color: var(--on-primary) !important;" in css
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_color_mix_tints_contrast(mode):
+    """Verify 12% color-mix tints over card keep text contrast >= 4.5:1 in both modes."""
+    t = THEMES[mode]
+    card_rgb = parse_color(t["card"])
+    text_rgb = parse_color(t["text"])
+
+    for sem_key in ("warning", "info", "success", "danger"):
+        sem_rgb = parse_color(t[sem_key])
+        # 12% semantic color + 88% card surface
+        tint_rgb = tuple(round(0.12 * s + 0.88 * c) for s, c in zip(sem_rgb, card_rgb))
+        l_text = rel_luminance(text_rgb)
+        l_tint = rel_luminance(tint_rgb)
+        ratio = (max(l_text, l_tint) + 0.05) / (min(l_text, l_tint) + 0.05)
+        assert ratio >= 4.5, f"[{mode}] text on {sem_key} tint contrast {ratio:.2f} < 4.5"

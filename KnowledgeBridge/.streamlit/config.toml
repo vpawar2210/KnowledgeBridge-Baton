@@ -10,8 +10,8 @@ font = "sans serif"
 
 [theme.dark]
 primaryColor = "#8EC5FF"
-backgroundColor = "#0F1420"
-secondaryBackgroundColor = "#171E2E"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#121212"
 textColor = "#F8FAFC"
 borderColor = "rgba(255, 255, 255, 0.12)"
 baseRadius = "0.5rem"

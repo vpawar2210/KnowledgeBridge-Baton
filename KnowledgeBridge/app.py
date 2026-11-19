@@ -123,12 +123,12 @@ THEMES = {
         "info": "#2B5F8A",
     },
     "dark": {
-        "bg": "#0F1420",
-        "sidebar": "#0B0F19",
-        "card": "#171E2E",
-        "surface": "#171E2E",
-        "subtle": "#1E2740",
-        "input_bg": "#171E2E",
+        "bg": "#000000",
+        "sidebar": "#0A0A0A",
+        "card": "#121212",
+        "surface": "#121212",
+        "subtle": "#1C1C1C",
+        "input_bg": "#121212",
         "input_border": "rgba(255, 255, 255, 0.35)",
         "border": "rgba(255, 255, 255, 0.12)",
         "text": "#F8FAFC",
@@ -137,16 +137,16 @@ THEMES = {
         "disabled": "#64748B",
         "primary": "#8EC5FF",
         "primary_hover": "#B3D8FF",
-        "on_primary": "#0F1420",
-        "secondary_bg": "#171E2E",
+        "on_primary": "#000000",
+        "secondary_bg": "#121212",
         "secondary_border": "rgba(255, 255, 255, 0.35)",
         "secondary_text": "#F8FAFC",
         "sidebar_active_bg": "#1C2F4A",
         "sidebar_active_border": "#8EC5FF",
         "sidebar_active_text": "#F8FAFC",
-        "sidebar_hover_bg": "#1E2740",
+        "sidebar_hover_bg": "#1C1C1C",
         "sidebar_hover_text": "#F8FAFC",
-        "toggle_bg": "#171E2E",
+        "toggle_bg": "#121212",
         "toggle_border": "rgba(255, 255, 255, 0.35)",
         "toggle_text": "#F8FAFC",
         "draft_bg": "#2A2312",
@@ -338,7 +338,7 @@ def redact_sensitive_info(text: str) -> str:
 
 
 # ─── THEME STYLING & TOGGLE ───────────────────────────────────────────────────
-def inject_theme_css(mode: str) -> None:
+def inject_theme_css(mode: str) -> str:
     t = THEMES[mode]
     auth_sidebar_css = ""
     if not st.session_state.get("authenticated"):
@@ -460,13 +460,110 @@ input, textarea, select, [data-baseweb="input"], [data-baseweb="textarea"], [dat
 input:focus, textarea:focus, [data-baseweb="input"]:focus-within, [data-baseweb="textarea"]:focus-within, [data-baseweb="select"]:focus-within {{ border-color: var(--primary) !important; }}
 ::placeholder, input::placeholder, textarea::placeholder {{ color: var(--placeholder) !important; opacity: 1 !important; }}
 :disabled, [disabled], button:disabled, input:disabled, textarea:disabled, [aria-disabled="true"] {{ color: var(--disabled) !important; opacity: 1 !important; }}
-button:disabled p, button:disabled span {{ color: var(--disabled) !important; }}
-.stButton > button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"], button[data-testid="stFormSubmitButton"] > button {{ background-color: var(--primary) !important; border: 1px solid var(--primary) !important; color: var(--on-primary) !important; border-radius: 8px; }}
-.stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span, button[data-testid="stFormSubmitButton"] > button p, button[data-testid="stFormSubmitButton"] > button span {{ color: var(--on-primary) !important; }}
-.stButton > button[kind="primary"]:hover, button[data-testid="stFormSubmitButton"] > button:hover {{ background-color: var(--primary-hover) !important; border-color: var(--primary-hover) !important; }}
-.main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) {{ background-color: var(--secondary-bg) !important; border: 1px solid var(--secondary-border) !important; color: var(--secondary-text) !important; border-radius: 8px; }}
-.main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) p, .main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) span {{ color: var(--secondary-text) !important; }}
-.main .stButton > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover {{ border-color: var(--primary) !important; }}
+button:disabled p, button:disabled span, button:disabled div, button:disabled [data-testid="stMarkdownContainer"], button:disabled [data-testid="stMarkdownContainer"] p {{ color: var(--disabled) !important; }}
+/* Primary buttons — tested on Streamlit 1.67.0 targets st.button(type="primary") and st.form_submit_button(type="primary") */
+button[data-testid="stBaseButton-primary"],
+button[kind="primary"],
+[data-testid="stButton"] button[kind="primary"],
+[data-testid="stButton"] button[data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button[kind="primary"],
+[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primary"],
+[data-testid="stFormSubmitButton"] button {{
+    background-color: var(--primary) !important;
+    border: 1px solid var(--primary) !important;
+    color: var(--on-primary) !important;
+    border-radius: 8px;
+}}
+button[data-testid="stBaseButton-primary"]:hover,
+button[kind="primary"]:hover,
+[data-testid="stButton"] button[kind="primary"]:hover,
+[data-testid="stButton"] button[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stFormSubmitButton"] button:hover {{
+    background-color: var(--primary-hover) !important;
+    border-color: var(--primary-hover) !important;
+}}
+button[data-testid="stBaseButton-primary"]:focus,
+button[kind="primary"]:focus,
+[data-testid="stButton"] button[kind="primary"]:focus,
+[data-testid="stButton"] button[data-testid="stBaseButton-primary"]:focus,
+[data-testid="stFormSubmitButton"] button:focus {{
+    background-color: var(--primary) !important;
+    border-color: var(--on-primary) !important;
+}}
+button[data-testid="stBaseButton-primary"]:active,
+button[kind="primary"]:active,
+[data-testid="stButton"] button[kind="primary"]:active,
+[data-testid="stButton"] button[data-testid="stBaseButton-primary"]:active,
+[data-testid="stFormSubmitButton"] button:active {{
+    background-color: var(--primary-hover) !important;
+    border-color: var(--primary-hover) !important;
+}}
+button[data-testid="stBaseButton-primary"] p,
+button[data-testid="stBaseButton-primary"] span,
+button[data-testid="stBaseButton-primary"] div,
+button[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"],
+button[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] p,
+button[data-testid="stBaseButton-primary"] [data-testid="stMarkdownContainer"] span,
+button[kind="primary"] p,
+button[kind="primary"] span,
+button[kind="primary"] div,
+button[kind="primary"] [data-testid="stMarkdownContainer"],
+button[kind="primary"] [data-testid="stMarkdownContainer"] p,
+button[kind="primary"] [data-testid="stMarkdownContainer"] span,
+[data-testid="stFormSubmitButton"] button p,
+[data-testid="stFormSubmitButton"] button span,
+[data-testid="stFormSubmitButton"] button div,
+[data-testid="stFormSubmitButton"] button [data-testid="stMarkdownContainer"],
+[data-testid="stFormSubmitButton"] button [data-testid="stMarkdownContainer"] p,
+[data-testid="stFormSubmitButton"] button [data-testid="stMarkdownContainer"] span,
+button[data-testid="stBaseButton-primary"]:hover p,
+button[data-testid="stBaseButton-primary"]:hover span,
+button[data-testid="stBaseButton-primary"]:hover [data-testid="stMarkdownContainer"] p,
+button[data-testid="stBaseButton-primary"]:focus p,
+button[data-testid="stBaseButton-primary"]:focus span,
+button[data-testid="stBaseButton-primary"]:focus [data-testid="stMarkdownContainer"] p,
+button[data-testid="stBaseButton-primary"]:active p,
+button[data-testid="stBaseButton-primary"]:active span,
+button[data-testid="stBaseButton-primary"]:active [data-testid="stMarkdownContainer"] p,
+[data-testid="stFormSubmitButton"] button:hover p,
+[data-testid="stFormSubmitButton"] button:hover span,
+[data-testid="stFormSubmitButton"] button:hover [data-testid="stMarkdownContainer"] p,
+[data-testid="stFormSubmitButton"] button:focus p,
+[data-testid="stFormSubmitButton"] button:focus span,
+[data-testid="stFormSubmitButton"] button:focus [data-testid="stMarkdownContainer"] p,
+[data-testid="stFormSubmitButton"] button:active p,
+[data-testid="stFormSubmitButton"] button:active span,
+[data-testid="stFormSubmitButton"] button:active [data-testid="stMarkdownContainer"] p {{
+    color: var(--on-primary) !important;
+}}
+/* Secondary buttons — tested on Streamlit 1.67.0 targets st.button(type="secondary") */
+button[data-testid="stBaseButton-secondary"],
+button[kind="secondary"],
+.main [data-testid="stButton"] > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]),
+.main [data-testid="stFormSubmitButton"] > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) {{
+    background-color: var(--secondary-bg) !important;
+    border: 1px solid var(--secondary-border) !important;
+    color: var(--secondary-text) !important;
+    border-radius: 8px;
+}}
+button[data-testid="stBaseButton-secondary"] p,
+button[data-testid="stBaseButton-secondary"] span,
+button[data-testid="stBaseButton-secondary"] [data-testid="stMarkdownContainer"],
+button[data-testid="stBaseButton-secondary"] [data-testid="stMarkdownContainer"] p,
+button[kind="secondary"] p,
+button[kind="secondary"] span,
+button[kind="secondary"] [data-testid="stMarkdownContainer"],
+button[kind="secondary"] [data-testid="stMarkdownContainer"] p,
+.main [data-testid="stButton"] > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) p,
+.main [data-testid="stButton"] > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]) span {{
+    color: var(--secondary-text) !important;
+}}
+button[data-testid="stBaseButton-secondary"]:hover,
+button[kind="secondary"]:hover,
+.main [data-testid="stButton"] > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover,
+.main [data-testid="stFormSubmitButton"] > button:not([kind="primary"]):not([data-testid="stBaseButton-primary"]):hover {{
+    border-color: var(--primary) !important;
+}}
 [data-testid="stSidebar"] {{ background-color: var(--sidebar) !important; border-right: 1px solid var(--border) !important; }}
 [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p, [data-testid="stSidebar"] label, [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {{ color: var(--text) !important; }}
 [data-testid="stSidebar"] .stButton > button {{ background: transparent !important; border: 1px solid transparent !important; border-radius: 6px; justify-content: flex-start; text-align: left; width: 100%; }}
@@ -566,6 +663,7 @@ a:hover {{ color: var(--text) !important; text-decoration-color: var(--primary-h
 .kb-mono {{ font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.92em; }}
 </style>""").strip()
     st.markdown(css, unsafe_allow_html=True)
+    return css
 
 
 def render_theme_toggle() -> None:
