@@ -613,7 +613,7 @@ def _seed_all(con: sqlite3.Connection, dataset: Dict[str, Any], completed: bool)
         approvals = {}
         manager_handover = None
         newhire_handover = None
-        employee_handover = None
+        employee_handover = encrypt_text(_build_employee_handover(dataset))
         handovers_run = 0
         successor_notes = []
 

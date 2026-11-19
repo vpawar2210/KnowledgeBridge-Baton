@@ -1197,8 +1197,6 @@ with st.sidebar:
             disabled = False
             if auth_role == "Employee" and page_id in ("reconstruct", "employee", "employee_notes") and not st.session_state.knowledge_profile:
                 disabled = True
-            elif auth_role == "Employee" and page_id == "employee_notes" and not st.session_state.employee_handover:
-                disabled = True
             elif auth_role == "Manager" and page_id in ("handover",) and not st.session_state.manager_handover:
                 disabled = True
             if st.button(
@@ -2188,7 +2186,7 @@ elif st.session_state.page == "employee":
             mgr_id = get_manager_id(st.session_state)
             emp_name = st.session_state.get("auth_name", "Employee")
             add_notification(st.session_state, mgr_id, "submit_review", f"{emp_name} submitted the handover for review.")
-            st.session_state.page = "review"
+            st.session_state.page = "employee_notes"
             st.rerun()
     with col_nav2:
         if st.button("Back to reconstruct", use_container_width=True):
@@ -2720,7 +2718,44 @@ elif st.session_state.page == "employee_notes":
 
     raw_emp = st.session_state.employee_handover
     if not raw_emp:
-        st.info("Your employee notes document will appear here after the manager generates the handover package.")
+        tk_items = st.session_state.get("employee_tribal_knowledge", [])
+        gap_answers = st.session_state.get("employee_gap_answers", {})
+        if tk_items or gap_answers:
+            lines = [
+                f"# Employee Notes — {employee} | {project}",
+                "",
+                "These are my first-person operational notes and tribal knowledge to accompany the technical handover.",
+                "",
+                "## My operational notes & tribal knowledge",
+                "",
+            ]
+            for item in tk_items:
+                cat = item.get("category", "Tip")
+                lines.append(f"### [{cat}] {item.get('title', 'Note')}")
+                lines.append(item.get("content", ""))
+                lines.append("")
+            if gap_answers:
+                lines.extend([
+                    "## Questions answered during reconstruction",
+                    "",
+                ])
+                for q, a in gap_answers.items():
+                    lines.append(f"**{q}**")
+                    lines.append(f"My answer: {a}")
+                    lines.append("")
+            raw_emp = "\n".join(lines)
+            st.session_state.employee_handover = raw_emp
+        else:
+            try:
+                from utils.demo_seed import _load_dataset, _build_employee_handover
+                dataset = _load_dataset()
+                raw_emp = _build_employee_handover(dataset)
+                st.session_state.employee_handover = raw_emp
+            except Exception:
+                raw_emp = None
+
+    if not raw_emp:
+        st.info("No employee notes found yet. You can record operational notes on the Verify findings page.")
         st.stop()
 
     redacted_emp = redact_sensitive_info(raw_emp)
