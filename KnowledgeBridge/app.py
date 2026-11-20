@@ -2095,7 +2095,7 @@ elif st.session_state.page == "employee":
 
                 st.markdown(textwrap.dedent(f"""
                 <div class="kb-card kb-card-warning">
-                    <p style="font-size:0.95rem; font-weight:600; color:var(--warning); margin-bottom:4px;">Question #{k+1}: {q_text}</p>
+                    <p style="font-size:0.95rem; font-weight:600; color:var(--text); margin-bottom:4px;">Question #{k+1}: {q_text}</p>
                     <p style="color:var(--text-2); font-size:0.82rem; margin-bottom:0;"><i>Detection rationale: {why}</i></p>
                 </div>
                 """).strip(), unsafe_allow_html=True)
